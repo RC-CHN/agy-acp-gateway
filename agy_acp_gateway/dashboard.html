@@ -185,6 +185,9 @@
         gap: 18px 20px;
         margin: 0;
       }
+      .metrics.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
       .metrics > div {
         border-left: 2px solid #d3e3d6;
         padding-left: 12px;
@@ -261,6 +264,26 @@
         font-size: 12px;
         color: var(--muted);
       }
+      .step {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .toast {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        z-index: 20;
+        background: var(--ink);
+        color: #fff;
+        font-size: 13px;
+        padding: 9px 14px;
+        border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(24, 41, 35, 0.22);
+        max-width: min(360px, calc(100vw - 32px));
+        overflow-wrap: anywhere;
+      }
       [hidden] {
         display: none !important;
       }
@@ -281,7 +304,8 @@
         .card {
           padding: 18px;
         }
-        .metrics {
+        .metrics,
+        .metrics.three {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         main {
@@ -340,17 +364,24 @@
           <p id="account"></p>
           <p class="meta" id="accountNote"></p>
           <form id="flow" class="flow" hidden>
-            <a
-              id="authlink"
-              class="link"
-              target="_blank"
-              rel="noopener noreferrer"
-              >打开 Google 授权页 ↗</a
-            ><label for="code">授权码或完整回调 URL</label
+            <div class="step">
+              <span class="hint">第 1 步</span>
+              <a
+                id="authlink"
+                class="link"
+                target="_blank"
+                rel="noopener noreferrer"
+                >打开 Google 授权页 ↗</a
+              >
+              <span id="countdown" class="foot"></span>
+            </div>
+            <label for="code">第 2 步 · 粘贴授权码或完整回调 URL</label
             ><input
               id="code"
-              type="password"
+              type="text"
               autocomplete="off"
+              spellcheck="false"
+              placeholder="粘贴 Google 回调页显示的授权码或完整 https://antigravity.google/oauth-callback?... 链接"
               required
             /><button class="primary" id="complete">完成登录</button>
           </form>
@@ -366,7 +397,7 @@
             <h2>请求与用量</h2>
             <span class="foot">本次启动以来</span>
           </div>
-          <dl id="usage" class="metrics"></dl>
+          <dl id="usage" class="metrics three"></dl>
           <p class="meta">
             仅累计 ACP 已报告的 Token。缓存命中和推理分别计入输入和输出。
           </p>
@@ -390,7 +421,7 @@
           <pre class="code" id="sample"></pre>
         </section>
       </div>
-      <div id="feedback" class="foot" role="status" aria-live="polite"></div>
+      <div id="feedback" class="toast" role="status" aria-live="polite" hidden></div>
     </main>
     <script>
       "use strict";
@@ -398,6 +429,9 @@
         show = (id, on) => ($(id).hidden = !on);
       let key = sessionStorage.getItem("gateway-key") || "",
         transaction = "",
+        expiresAt = 0,
+        countdownTimer = 0,
+        toastTimer = 0,
         tab = "base",
         status = null,
         revision = 0,
@@ -408,8 +442,36 @@
         $("notice").textContent = message;
         show("notice", !!message);
       }
+      function toast(message) {
+        clearTimeout(toastTimer);
+        $("feedback").textContent = message;
+        show("feedback", !!message);
+        if (message) {
+          toastTimer = setTimeout(() => show("feedback", false), 1800);
+        }
+      }
+      function updateCountdown() {
+        if (!expiresAt || !transaction) {
+          $("countdown").textContent = "";
+          return;
+        }
+        const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        if (left === 0) {
+          $("countdown").textContent = "授权链接已过期，请重新开始";
+          clearInterval(countdownTimer);
+          countdownTimer = 0;
+          return;
+        }
+        const m = Math.floor(left / 60),
+          s = String(left % 60).padStart(2, "0");
+        $("countdown").textContent = "剩余有效时间 " + m + ":" + s;
+      }
       function resetFlow() {
         transaction = "";
+        expiresAt = 0;
+        clearInterval(countdownTimer);
+        countdownTimer = 0;
+        $("countdown").textContent = "";
         $("authlink").removeAttribute("href");
         $("code").value = "";
         show("flow", false);
@@ -427,7 +489,7 @@
         $("key").value = "";
         $("badge").textContent = "待解锁";
         $("badge").className = "badge wait";
-        $("feedback").textContent = "";
+        toast("");
         $("key").focus();
       }
       async function api(path, data) {
@@ -454,10 +516,11 @@
         }
         return body;
       }
-      function failed(e) {
+      function failed(e, quietAuth = false) {
         if (e.code === "invalid_api_key") {
+          const hadKey = !!key;
           lock();
-          notice("请输入有效的网关 API Key。");
+          if (hadKey || !quietAuth) notice("API Key 无效，请重新输入。");
           return;
         }
         notice([e.message, e.code, e.requestId].filter(Boolean).join(" · "));
@@ -503,7 +566,7 @@
         for (const b of $("tabs").children)
           b.setAttribute("aria-pressed", String(b.dataset.tab === tab));
       }
-      async function copyText(text) {
+      async function copyText(text, label = "", btn = null) {
         try {
           if (navigator.clipboard && window.isSecureContext)
             await navigator.clipboard.writeText(text);
@@ -516,7 +579,16 @@
             t.remove();
             if (!ok) throw Error();
           }
-          $("feedback").textContent = "已复制到剪贴板";
+          toast(label ? "已复制 " + label : "已复制到剪贴板");
+          if (btn) {
+            const orig = btn.dataset.origLabel || btn.textContent;
+            btn.dataset.origLabel = orig;
+            btn.textContent = "已复制 ✓";
+            clearTimeout(btn._copyTimer);
+            btn._copyTimer = setTimeout(() => {
+              btn.textContent = orig;
+            }, 1400);
+          }
         } catch {
           notice("无法访问剪贴板，请手动复制。");
         }
@@ -527,7 +599,7 @@
         const { auth: a, acp: c, sessions: x, usage: u } = s;
         show("unlock", false);
         show("panel", true);
-        show("lock", true);
+        show("lock", !!key);
         const mock = a.status === "mock",
           external = a.credential_mode === "external",
           auth = a.status === "authenticated",
@@ -557,7 +629,9 @@
           : mock
             ? "当前模式无需 Google 登录。"
             : a.login_in_progress
-              ? "正在等待 Google 登录完成。"
+              ? transaction
+                ? "请在新标签页完成授权，再将授权码或回调 URL 粘贴到下方提交。"
+                : "检测到进行中的登录流程（可能因刷新页面丢失当前链接），请先点击「取消登录」后重新开始。"
               : recovering
                 ? "正在使用已有凭据重新连接，网关会自动重试。"
                 : needsLogin
@@ -626,12 +700,12 @@
           const b = document.createElement("button");
           b.className = "model";
           b.textContent = id;
-          b.onclick = () => copyText(id);
+          b.onclick = () => copyText(id, id, b);
           $("models").append(b);
         }
         sample();
       }
-      async function refresh(manual = false) {
+      async function refresh(manual = false, quietAuth = false) {
         const my = ++revision;
         try {
           const s = await api("status");
@@ -640,7 +714,7 @@
             if (manual) notice();
           }
         } catch (e) {
-          if (my === revision) failed(e);
+          if (my === revision) failed(e, quietAuth);
         }
       }
       async function act(action, body = {}) {
@@ -671,8 +745,16 @@
             )
               throw Error("授权链接无效");
             transaction = v.login_id;
+            expiresAt = Date.now() + (Number(v.expires_in_s) || 300) * 1000;
             $("authlink").href = u.href;
-          } else resetFlow();
+            updateCountdown();
+            clearInterval(countdownTimer);
+            countdownTimer = setInterval(updateCountdown, 1000);
+          } else {
+            resetFlow();
+            if (action === "complete") toast("登录成功，正在连接 ACP…");
+            if (action === "logout") toast("已退出登录");
+          }
         } catch (e) {
           if (e.code === "invalid_login_id") resetFlow();
           failed(e);
@@ -697,7 +779,7 @@
         key = input.value;
         input.disabled = true;
         try {
-          await refresh(true);
+          await refresh(true, false);
           if (!locked && status) {
             sessionStorage.setItem("gateway-key", key);
             input.value = "";
@@ -721,7 +803,6 @@
       $("flow").onsubmit = (e) => {
         e.preventDefault();
         const code = $("code").value;
-        $("code").value = "";
         act("complete", { login_id: transaction, code });
       };
       $("tabs").onclick = (e) => {
@@ -730,8 +811,8 @@
           sample();
         }
       };
-      $("copy").onclick = () => copyText($("sample").textContent);
-      refresh();
+      $("copy").onclick = () => copyText($("sample").textContent, "接入示例", $("copy"));
+      refresh(false, true);
       setInterval(() => {
         if (!busy && !locked && !document.hidden) refresh();
       }, 4000);

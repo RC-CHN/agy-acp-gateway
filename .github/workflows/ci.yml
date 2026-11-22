@@ -52,6 +52,27 @@ jobs:
             -d '{"model":"mock","input":"release smoke test"}' |
             jq -e 'any(.output[]?.content[]?; .text == "echo: release smoke test")'
 
+  dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Check the embedded dashboard in Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dashboard-test" --ignore-scripts --no-audit --no-fund playwright-core@1.55.0
+          go build -o "$RUNNER_TEMP/dashboard-gateway" ./agy_acp_gateway
+          GATEWAY_API_KEY=dashboard-fixture "$RUNNER_TEMP/dashboard-gateway" -listen 127.0.0.1:18080 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" || true' EXIT
+          curl -fsS --retry 10 --retry-all-errors http://127.0.0.1:18080/ready
+          NODE_PATH="$RUNNER_TEMP/dashboard-test/node_modules" CHROME_BIN="$(command -v google-chrome)" node scripts/verify_dashboard.cjs
+
   native:
     if: inputs.native
     runs-on: ubuntu-24.04

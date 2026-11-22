@@ -169,6 +169,18 @@ Compose 使用本机镜像标签 `agy-acp-gateway:aio`。编译阶段默认镜�
 
 轻量镜像可用 `docker build --target slim -t agy-acp-gateway:slim .` 构建，默认运行内置 mock。直接使用 `docker run` 时可以用 `--env-file .env` 或 `-e GATEWAY_API_KEY -e HTTPS_PROXY -e NO_PROXY` 传入配置。
 
+已在宿主机安装兼容的 Linux agy 时，也可以让发布的 slim 镜像运行该 CLI。以下示例使用独立的可写数据目录；`GATEWAY_API_KEY` 应已导出，`HTTPS_PROXY` 与 `NO_PROXY` 按部署环境设置。
+
+```bash
+state="${XDG_DATA_HOME:-$HOME/.local/share}/agy-acp-gateway"
+install -d -m 700 "$state"
+docker run --rm --init --user "$(id -u):$(id -g)" -p 127.0.0.1:8080:8080 \
+  -v "$(realpath "$(command -v agy)"):/usr/local/bin/agy:ro" -v "$state:/data" \
+  -e HOME=/data -e GATEWAY_API_KEY -e HTTPS_PROXY -e NO_PROXY \
+  ghcr.io/rc-chn/agy-acp-gateway:v0.1.0 -listen 0.0.0.0:8080 -agy /usr/local/bin/agy -live
+```
+
+
 ## 离线验收
 
 ```bash
@@ -212,4 +224,4 @@ Linux amd64 的 slim 和 AIO 镜像内置 Frida 17.27.4。网关启动原生 agy
 
 ## 持续集成与发布
 
-推送到 main 和提交 PR 会运行最低支持的 Go 1.23 及 Go 1.26 的静态检查、竞态测试、Compose 配置校验和独立二进制 HTTP 冒烟测试。在 Actions 的 CI 页面勾选 `native` 可另外构建 AIO 与 slim 并用临时身份执行原生 CLI 离线验收。推送形如 `v0.1.0` 的版本标签会先运行 CI 与 amd64 原生镜像验收，再发布 Linux 二进制、校验和和 slim 容器。[CI 工作流](.github/workflows/ci.yml) · [发布工作流](.github/workflows/release.yml)
+推送到 main 和提交 PR 会运行最低支持的 Go 1.23 及 Go 1.26 的静态检查、竞态测试、Compose 配置校验和独立二进制 HTTP 冒烟测试。Chromium 另行验证 Dashboard 的桌面和手机布局、剪贴板、授权倒计时以及刷新页面后的登录恢复。在 Actions 的 CI 页面勾选 `native` 可另外构建 AIO 与 slim 并用临时身份执行原生 CLI 离线验收。推送形如 `v0.1.0` 的版本标签会先运行 CI 与 amd64 原生镜像验收，再发布 Linux 二进制、校验和和 slim 容器。[CI 工作流](.github/workflows/ci.yml) · [发布工作流](.github/workflows/release.yml)
