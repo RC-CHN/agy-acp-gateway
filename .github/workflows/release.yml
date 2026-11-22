@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        run: '[[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build Linux archives
+        env:
+          CGO_ENABLED: '0'
+          GOPROXY: 'off'
+        run: |
+          mkdir dist
+          for arch in amd64 arm64; do
+            name="agy-acp-gateway-${VERSION}-linux-${arch}"
+            mkdir -p "$RUNNER_TEMP/$name"
+            GOOS=linux GOARCH="$arch" go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/$name/agy-acp-gateway" ./agy_acp_gateway
+            cp LICENSE README.md "$RUNNER_TEMP/$name/"
+            tar -C "$RUNNER_TEMP" -czf "dist/$name.tar.gz" "$name"
+          done
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Publish slim images and export the amd64 image for offline loading
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build --platform linux/amd64,linux/arm64 --target slim \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.licenses=MIT" \
+            --tag "$image:$VERSION" --push .
+          docker pull --platform linux/amd64 "$image:$VERSION"
+          docker run --rm --network none --entrypoint /bin/sh "$image:$VERSION" -ec 'test -x /usr/local/bin/agy-acp-gateway; test -s /usr/share/doc/agy-acp-gateway/LICENSE'
+          docker save "$image:$VERSION" | gzip -n > "dist/agy-acp-gateway-${VERSION}-slim-linux-amd64.docker.tar.gz"
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+      - name: Publish the verified assets on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/release.md" <<EOF
+          Linux gateway binaries for amd64 and arm64 include the MIT license. Verify downloads with \`sha256sum -c --ignore-missing SHA256SUMS\`.
+
+          The multi-platform slim container runs the offline mock by default.
+
+          \`\`\`sh
+          docker pull ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION
+          \`\`\`
+
+          The attached amd64 Docker archive also works with \`docker load -i\`. The AIO Dockerfile downloads the native CLI from the official installer when built locally.
+          EOF
+          if gh release view "$VERSION" --json isDraft --jq .isDraft > "$RUNNER_TEMP/is-draft"; then
+            test "$(cat "$RUNNER_TEMP/is-draft")" = true
+          else
+            gh release create "$VERSION" --verify-tag --draft --title "$VERSION" --notes-file "$RUNNER_TEMP/release.md"
+          fi
+          gh release upload "$VERSION" dist/* --clobber
+          gh release edit "$VERSION" --draft=false

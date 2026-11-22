@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      native:
+        description: Build the AIO image with the official installer and run the native CLI offline
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.23.x', '1.26.x']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Check formatting and test the offline gateway
+        run: |
+          test -z "$(gofmt -l agy_acp_gateway)"
+          ./scripts/verify_acp_gateway.sh
+          GATEWAY_API_KEY=ci-fixture docker compose config --quiet
+      - name: Exercise the standalone binary in mock mode
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/gateway" ./agy_acp_gateway
+          "$RUNNER_TEMP/gateway" -listen 127.0.0.1:18080 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" || true' EXIT
+          curl -fsS --retry 20 --retry-all-errors http://127.0.0.1:18080/ready
+          curl -fsS http://127.0.0.1:18080/v1/responses -H 'Content-Type: application/json' \
+            -d '{"model":"mock","input":"release smoke test"}' |
+            jq -e 'any(.output[]?.content[]?; .text == "echo: release smoke test")'
+
+  native:
+    if: github.event_name == 'workflow_dispatch' && inputs.native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build and test both local images
+        run: |
+          docker build --target slim -t agy-acp-gateway:slim .
+          docker build --target aio -t agy-acp-gateway:aio .
+          ./scripts/verify_aio.sh
+      - name: Test the CLI from the AIO image against loopback mocks
+        run: |
+          cid=$(docker create --network none agy-acp-gateway:aio)
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          docker cp "$cid":/usr/local/bin/agy "$RUNNER_TEMP/agy"
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/verify" ./agy_acp_gateway
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/gateway" ./agy_acp_gateway
+          sudo unshare --net -- sh -ec 'ip link set lo up; exec runuser -u "$1" -- env AGY_REAL_BINARY="$2/agy" AGY_GATEWAY_BINARY="$2/gateway" "$2/verify" -test.v -test.run "^TestReal" -test.timeout 5m' sh "$USER" "$RUNNER_TEMP"

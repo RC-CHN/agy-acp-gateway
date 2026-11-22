@@ -1,0 +1,10 @@
+**
+!go.mod
+!agy_acp_gateway/
+!agy_acp_gateway/*.go
+!agy_acp_gateway/dashboard.html
+!agy_acp_gateway/observer/
+!agy_acp_gateway/observer/bridge.py
+!agy_acp_gateway/observer/status.js
+!Dockerfile
+!LICENSE

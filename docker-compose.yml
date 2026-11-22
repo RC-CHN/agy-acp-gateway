@@ -1,0 +1,45 @@
+x-proxy: &proxy
+  HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+  HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+  ALL_PROXY: ${ALL_PROXY:-${all_proxy:-}}
+  NO_PROXY: ${NO_PROXY:-${no_proxy:-127.0.0.1,localhost,::1}}
+  http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+  https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+  all_proxy: ${all_proxy:-${ALL_PROXY:-}}
+  no_proxy: ${no_proxy:-${NO_PROXY:-127.0.0.1,localhost,::1}}
+
+services:
+  acp-gateway:
+    image: agy-acp-gateway:aio
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aio
+      args:
+        <<: *proxy
+        GO_BUILD_IMAGE: ${GO_BUILD_IMAGE:-golang:1.26-bookworm}
+        AGY_INSTALL_URL: ${AGY_INSTALL_URL:-https://antigravity.google/cli/install.sh}
+        AGY_EXPECTED_VERSION: ${AGY_EXPECTED_VERSION:-}
+        AGY_EXPECTED_SHA256: ${AGY_EXPECTED_SHA256:-}
+    command: ["-listen", "0.0.0.0:8080", "-agy", "/usr/local/bin/agy", "-live"]
+    environment:
+      <<: *proxy
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?set a local gateway API key}
+      GATEWAY_AUTH_KEEPALIVE_INTERVAL: ${GATEWAY_AUTH_KEEPALIVE_INTERVAL:-30m}
+      GATEWAY_DASHBOARD: ${GATEWAY_DASHBOARD:-true}
+      GATEWAY_CREDENTIAL_MODE: ${GATEWAY_CREDENTIAL_MODE:-managed}
+    volumes:
+      - agy-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+
+volumes:
+  agy-data:
+    name: ${AGY_DATA_VOLUME:-${COMPOSE_PROJECT_NAME}_agy-data}

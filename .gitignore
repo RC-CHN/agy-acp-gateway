@@ -1,0 +1,32 @@
+# Local research, reverse-engineering artifacts, binary samples & legacy prototypes
+research/
+.rcoder/
+.venv/
+
+# Build outputs & runtime data
+/agy-acp-gateway
+/dist/
+antigravity-oauth-token
+acp-auth-state.json
+acp_auth_state.json
+*.test
+*.out
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets, certificates & credentials
+*.pem
+*.key
+*.crt
+.env
+.env.*
+!.env.example
+
+# OS / editor / language caches
+.DS_Store
+__pycache__/
+*.pyc
+.idea/
+.vscode/

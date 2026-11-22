@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>AGY ACP Gateway · 控制台</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #182923;
+        --muted: #576961;
+        --edge: #ced7ce;
+        --wash: #f3f5ef;
+        --accent: #215843;
+        --paper: #fffefa;
+        font:
+          15px/1.55 "Inter",
+          "Noto Sans CJK SC",
+          system-ui,
+          sans-serif;
+        color: var(--ink);
+        background: var(--wash);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header {
+        border-bottom: 1px solid var(--edge);
+        background: var(--paper);
+      }
+      .bar,
+      main {
+        max-width: 1060px;
+        margin: auto;
+        padding: 0 32px;
+      }
+      .bar {
+        min-height: 72px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .brand {
+        font-weight: 700;
+        letter-spacing: -0.045em;
+        font-size: 21px;
+      }
+      .mark {
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        background: var(--accent);
+        color: white;
+        border-radius: 7px;
+        font: 700 18px monospace;
+        margin-right: 10px;
+      }
+      .spacer {
+        flex: 1;
+      }
+      main {
+        padding-top: 42px;
+        padding-bottom: 60px;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: clamp(28px, 4vw, 42px);
+        letter-spacing: -0.045em;
+        line-height: 1.2;
+      }
+      h2 {
+        font-size: 19px;
+      }
+      h3,
+      label,
+      dt,
+      .hint {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      h3 {
+        font-weight: 600;
+      }
+      .heading,
+      .row,
+      .actions {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .heading {
+        justify-content: space-between;
+        margin-bottom: 19px;
+      }
+      .actions {
+        gap: 8px;
+      }
+      .card {
+        margin: 18px 0;
+        background: var(--paper);
+        border: 1px solid var(--edge);
+        border-radius: 12px;
+        padding: 24px;
+      }
+      .badge {
+        font-size: 12px;
+        font-weight: 650;
+        line-height: 1.2;
+        border-radius: 99px;
+        padding: 6px 10px;
+        background: #e4ede3;
+        color: #254c3c;
+      }
+      .badge.wait {
+        background: #f6ebcf;
+        color: #644f1c;
+      }
+      button,
+      input,
+      .link {
+        font: inherit;
+      }
+      button,
+      .link {
+        cursor: pointer;
+        border: 1px solid var(--edge);
+        background: white;
+        color: var(--ink);
+        padding: 7px 13px;
+        border-radius: 6px;
+        text-decoration: none;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      button:hover,
+      .link:hover {
+        border-color: var(--accent);
+      }
+      .primary,
+      .link {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+      }
+      :focus-visible {
+        outline: 3px solid #569776;
+        outline-offset: 2px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      input {
+        width: 100%;
+        border: 1px solid #aab9ae;
+        border-radius: 6px;
+        background: white;
+        padding: 10px 12px;
+        display: block;
+        margin: 6px 0 12px;
+      }
+      .notice {
+        color: #863623;
+        background: #fff1e8;
+        padding: 10px 14px;
+        border-radius: 6px;
+        margin: 12px 0;
+        overflow-wrap: anywhere;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 18px 20px;
+        margin: 0;
+      }
+      .metrics > div {
+        border-left: 2px solid #d3e3d6;
+        padding-left: 12px;
+      }
+      .metrics dd {
+        margin: 2px 0 0;
+        font-size: 23px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        overflow-wrap: anywhere;
+      }
+      .rule {
+        border: 0;
+        border-top: 1px solid var(--edge);
+        margin: 22px 0;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 13px;
+      }
+      .models {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin: 12px 0;
+      }
+      .model {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        font:
+          13px/1.4 "IBM Plex Mono",
+          monospace;
+        background: #edf3eb;
+      }
+      .model::after {
+        content: " ⧉";
+        color: var(--muted);
+      }
+      .code {
+        display: block;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #20332b;
+        color: #f0f4e9;
+        padding: 17px;
+        border-radius: 8px;
+        font:
+          13px/1.65 "IBM Plex Mono",
+          monospace;
+        margin: 12px 0 0;
+      }
+      .tabs button[aria-pressed="true"] {
+        background: #dfebdf;
+        color: #154833;
+        border-color: #a8bfa8;
+      }
+      .login {
+        max-width: 470px;
+        margin: 7vh auto;
+      }
+      .login label,
+      .flow label {
+        display: block;
+        margin-top: 15px;
+      }
+      .flow {
+        margin-top: 18px;
+        padding-top: 18px;
+        border-top: 1px solid var(--edge);
+        max-width: 700px;
+      }
+      .foot {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 650px) {
+        .bar,
+        main {
+          padding-left: 16px;
+          padding-right: 16px;
+        }
+        .bar {
+          gap: 8px;
+          padding-top: 10px;
+          padding-bottom: 10px;
+        }
+        .bar .brand {
+          font-size: 18px;
+        }
+        .card {
+          padding: 18px;
+        }
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        main {
+          padding-top: 26px;
+        }
+        .bar button {
+          padding: 6px 9px;
+        }
+        .heading {
+          align-items: flex-start;
+        }
+        .mark {
+          margin-right: 6px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <span class="brand"
+          ><span class="mark" aria-hidden="true">›_</span>AGY ACP Gateway</span
+        ><span id="badge" class="badge wait">连接中</span
+        ><span class="spacer"></span>
+        <div class="actions">
+          <button id="refresh">刷新</button
+          ><button id="lock" hidden>切换密钥</button>
+        </div>
+      </div>
+    </header>
+    <main>
+      <div id="notice" class="notice" role="alert" hidden></div>
+      <form class="card login" id="unlock" hidden>
+        <h2>解锁控制台</h2>
+        <label for="key">网关 API Key</label
+        ><input id="key" type="password" autocomplete="off" required /><button
+          class="primary"
+        >
+          解锁
+        </button>
+      </form>
+      <div id="panel" hidden>
+        <div class="heading">
+          <h1>网关概览</h1>
+          <span id="uptime" class="foot"></span>
+        </div>
+        <section class="card">
+          <div class="heading">
+            <h2>Google 账号</h2>
+            <div class="actions">
+              <button class="primary" id="start" hidden>开始 Google 登录</button
+              ><button id="logout" hidden>退出登录</button
+              ><button id="cancel" hidden>取消登录</button>
+            </div>
+          </div>
+          <p id="account"></p>
+          <p class="meta" id="accountNote"></p>
+          <form id="flow" class="flow" hidden>
+            <a
+              id="authlink"
+              class="link"
+              target="_blank"
+              rel="noopener noreferrer"
+              >打开 Google 授权页 ↗</a
+            ><label for="code">授权码或完整回调 URL</label
+            ><input
+              id="code"
+              type="password"
+              autocomplete="off"
+              required
+            /><button class="primary" id="complete">完成登录</button>
+          </form>
+        </section>
+        <section class="card">
+          <div class="heading">
+            <h2>运行状态</h2>
+            <span id="agent" class="foot"></span>
+          </div>
+          <dl id="runtime" class="metrics"></dl>
+          <hr class="rule" />
+          <div class="heading">
+            <h2>请求与用量</h2>
+            <span class="foot">本次启动以来</span>
+          </div>
+          <dl id="usage" class="metrics"></dl>
+          <p class="meta">
+            仅累计 ACP 已报告的 Token。缓存命中和推理分别计入输入和输出。
+          </p>
+        </section>
+        <section class="card">
+          <div class="heading">
+            <h2>模型与接入</h2>
+            <span id="modelCount" class="foot"></span>
+          </div>
+          <h3>可用模型 · 点击复制 ID</h3>
+          <div id="models" class="models"></div>
+          <hr class="rule" />
+          <div class="row">
+            <div class="actions tabs" id="tabs">
+              <button data-tab="base" aria-pressed="true">Base URL</button
+              ><button data-tab="curl" aria-pressed="false">cURL</button
+              ><button data-tab="python" aria-pressed="false">Python</button>
+            </div>
+            <span class="spacer"></span><button id="copy">复制</button>
+          </div>
+          <pre class="code" id="sample"></pre>
+        </section>
+      </div>
+      <div id="feedback" class="foot" role="status" aria-live="polite"></div>
+    </main>
+    <script>
+      "use strict";
+      const $ = (id) => document.getElementById(id),
+        show = (id, on) => ($(id).hidden = !on);
+      let key = sessionStorage.getItem("gateway-key") || "",
+        transaction = "",
+        tab = "base",
+        status = null,
+        revision = 0,
+        busy = false,
+        locked = false;
+      const number = new Intl.NumberFormat("zh-CN");
+      function notice(message = "") {
+        $("notice").textContent = message;
+        show("notice", !!message);
+      }
+      function resetFlow() {
+        transaction = "";
+        $("authlink").removeAttribute("href");
+        $("code").value = "";
+        show("flow", false);
+      }
+      function lock() {
+        revision++;
+        locked = true;
+        status = null;
+        key = "";
+        sessionStorage.removeItem("gateway-key");
+        resetFlow();
+        show("panel", false);
+        show("lock", false);
+        show("unlock", true);
+        $("key").value = "";
+        $("badge").textContent = "待解锁";
+        $("badge").className = "badge wait";
+        $("feedback").textContent = "";
+        $("key").focus();
+      }
+      async function api(path, data) {
+        const headers = {};
+        if (key) headers.Authorization = "Bearer " + key;
+        const init = {
+          headers,
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+        };
+        if (data !== undefined) {
+          init.method = "POST";
+          headers["Content-Type"] = "application/json";
+          init.body = JSON.stringify(data);
+        }
+        const res = await fetch("/admin/api/" + path, init),
+          body = await res.json();
+        if (!res.ok) {
+          const e = new Error(body.error?.message || "管理请求失败");
+          e.code = body.error?.code;
+          e.requestId = res.headers.get("X-Request-Id");
+          throw e;
+        }
+        return body;
+      }
+      function failed(e) {
+        if (e.code === "invalid_api_key") {
+          lock();
+          notice("请输入有效的网关 API Key。");
+          return;
+        }
+        notice([e.message, e.code, e.requestId].filter(Boolean).join(" · "));
+      }
+      function metrics(id, items) {
+        const list = $(id);
+        list.replaceChildren();
+        for (const [name, value] of items) {
+          const item = document.createElement("div"),
+            dt = document.createElement("dt"),
+            dd = document.createElement("dd");
+          dt.textContent = name;
+          dd.textContent =
+            typeof value === "number" ? number.format(value) : value;
+          item.append(dt, dd);
+          list.append(item);
+        }
+      }
+      function sample() {
+        const base = location.origin + "/v1",
+          model =
+            status?.acp.default_model || status?.acp.models[0] || "MODEL_ID";
+        const payload = JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "Hello" }],
+        });
+        const sh = (s) => "'" + s.replaceAll("'", "'\"'\"'") + "'";
+        const snippets = {
+          base,
+          curl:
+            "curl " +
+            sh(base + "/chat/completions") +
+            ' \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d ' +
+            sh(payload),
+          python:
+            "from openai import OpenAI\n\nclient = OpenAI(base_url=" +
+            JSON.stringify(base) +
+            ', api_key="YOUR_API_KEY")\nresponse = client.responses.create(model=' +
+            JSON.stringify(model) +
+            ', input="Hello")\nprint(response.output_text)',
+        };
+        $("sample").textContent = snippets[tab];
+        for (const b of $("tabs").children)
+          b.setAttribute("aria-pressed", String(b.dataset.tab === tab));
+      }
+      async function copyText(text) {
+        try {
+          if (navigator.clipboard && window.isSecureContext)
+            await navigator.clipboard.writeText(text);
+          else {
+            const t = document.createElement("textarea");
+            t.value = text;
+            document.body.append(t);
+            t.select();
+            const ok = document.execCommand("copy");
+            t.remove();
+            if (!ok) throw Error();
+          }
+          $("feedback").textContent = "已复制到剪贴板";
+        } catch {
+          notice("无法访问剪贴板，请手动复制。");
+        }
+      }
+      function render(s) {
+        status = s;
+        locked = false;
+        const { auth: a, acp: c, sessions: x, usage: u } = s;
+        show("unlock", false);
+        show("panel", true);
+        show("lock", true);
+        const mock = a.status === "mock",
+          external = a.credential_mode === "external",
+          auth = a.status === "authenticated",
+          recovering = a.status === "recovering",
+          needsLogin = a.status === "unauthenticated";
+        if (!a.login_in_progress) resetFlow();
+        $("badge").textContent = mock
+          ? "Mock 模式"
+          : c.alive
+            ? "就绪"
+            : needsLogin
+              ? a.saved_login
+                ? "认证待恢复"
+                : "等待登录"
+              : recovering
+                ? "正在恢复连接"
+                : "正在连接";
+        $("badge").className = "badge" + (!c.alive ? " wait" : "");
+        $("account").textContent = mock
+          ? s.mode === "mock-ccpa"
+            ? "本地 Mock CCPA"
+            : "内置 Mock ACP"
+          : a.email ||
+            (auth ? "已登录" : needsLogin ? "未登录" : "正在检查已有登录");
+        $("accountNote").textContent = external
+          ? "凭据由宿主机管理。"
+          : mock
+            ? "当前模式无需 Google 登录。"
+            : a.login_in_progress
+              ? "正在等待 Google 登录完成。"
+              : recovering
+                ? "正在使用已有凭据重新连接，网关会自动重试。"
+                : needsLogin
+                  ? a.saved_login
+                    ? "agy 暂未恢复已有登录，网关每 30 秒自动重试。授权已撤销时可重新授权。"
+                    : "登录后，网关会自动连接 ACP。"
+                  : c.alive
+                    ? "账号已连接到 ACP。"
+                    : "正在检查 agy 已保存的登录态。";
+        if (
+          !a.login_in_progress &&
+          c.alive &&
+          a.keepalive_enabled &&
+          a.last_silent_check_at
+        ) {
+          const checked = new Date(a.last_silent_check_at).toLocaleTimeString(
+            "zh-CN",
+          );
+          $("accountNote").textContent += a.last_silent_check_error
+            ? " 上次静默检查暂未成功，网关会自动重试。"
+            : " 上次静默检查成功于 " + checked + "。";
+        }
+        show(
+          "start",
+          !mock &&
+            !external &&
+            !a.login_in_progress &&
+            (needsLogin || auth || recovering),
+        );
+        $("start").textContent = needsLogin
+          ? a.saved_login
+            ? "重新授权"
+            : "开始 Google 登录"
+          : "切换账号";
+        show("cancel", !mock && !external && a.login_in_progress);
+        show("logout", !mock && !external && !!(a.email || auth || recovering));
+        show("flow", !!transaction && a.login_in_progress);
+        const mins = Math.floor(c.uptime_s / 60);
+        $("uptime").textContent =
+          "已运行 " +
+          (mins > 59 ? Math.floor(mins / 60) + " 小时 " : "") +
+          (mins % 60) +
+          " 分钟";
+        $("agent").textContent =
+          s.agent +
+          " · 工具软屏蔽" +
+          (s.soft_block_residual_tools ? "开启" : "关闭");
+        metrics("runtime", [
+          ["ACP", c.alive ? "就绪" : "等待连接"],
+          ["会话 / 上限", x.active + " / " + x.max],
+          ["挂起工具", x.pending_tool_calls],
+          ["拦截权限", x.denied_permissions],
+        ]);
+        metrics("usage", [
+          ["总请求", u.requests_total],
+          ["失败请求", u.requests_errors],
+          ["输入 Token", u.input_tokens],
+          ["输出 Token", u.output_tokens],
+          ["缓存命中", u.cached_tokens],
+          ["推理 Token", u.reasoning_tokens],
+        ]);
+        $("modelCount").textContent = c.models.length + " 个模型";
+        $("models").replaceChildren();
+        if (!c.models.length) $("models").textContent = "模型目录尚未就绪。";
+        for (const id of c.models) {
+          const b = document.createElement("button");
+          b.className = "model";
+          b.textContent = id;
+          b.onclick = () => copyText(id);
+          $("models").append(b);
+        }
+        sample();
+      }
+      async function refresh(manual = false) {
+        const my = ++revision;
+        try {
+          const s = await api("status");
+          if (my === revision) {
+            render(s);
+            if (manual) notice();
+          }
+        } catch (e) {
+          if (my === revision) failed(e);
+        }
+      }
+      async function act(action, body = {}) {
+        if (busy) return;
+        busy = true;
+        ++revision;
+        notice();
+        for (const id of [
+          "start",
+          "logout",
+          "cancel",
+          "complete",
+          "lock",
+          "refresh",
+        ])
+          $(id).disabled = true;
+        try {
+          const v = await api("auth/" + action, body);
+          if (action === "start") {
+            const u = new URL(v.auth_url);
+            if (
+              u.protocol !== "https:" ||
+              u.hostname !== "accounts.google.com" ||
+              u.port ||
+              u.username ||
+              u.password ||
+              u.pathname !== "/o/oauth2/auth"
+            )
+              throw Error("授权链接无效");
+            transaction = v.login_id;
+            $("authlink").href = u.href;
+          } else resetFlow();
+        } catch (e) {
+          if (e.code === "invalid_login_id") resetFlow();
+          failed(e);
+        } finally {
+          busy = false;
+          for (const id of [
+            "start",
+            "logout",
+            "cancel",
+            "complete",
+            "lock",
+            "refresh",
+          ])
+            $(id).disabled = false;
+          if (!locked) await refresh();
+        }
+      }
+      $("unlock").onsubmit = async (e) => {
+        e.preventDefault();
+        const input = $("key");
+        if (input.disabled) return;
+        key = input.value;
+        input.disabled = true;
+        try {
+          await refresh(true);
+          if (!locked && status) {
+            sessionStorage.setItem("gateway-key", key);
+            input.value = "";
+          }
+        } finally {
+          input.disabled = false;
+          if (locked) input.focus();
+        }
+      };
+      $("lock").onclick = () => {
+        notice();
+        lock();
+      };
+      $("refresh").onclick = () => refresh(true);
+      $("start").onclick = () => act("start");
+      $("cancel").onclick = () =>
+        act("cancel", transaction ? { login_id: transaction } : {});
+      $("logout").onclick = () => {
+        if (confirm("退出当前账号并结束其会话？")) act("logout");
+      };
+      $("flow").onsubmit = (e) => {
+        e.preventDefault();
+        const code = $("code").value;
+        $("code").value = "";
+        act("complete", { login_id: transaction, code });
+      };
+      $("tabs").onclick = (e) => {
+        if (e.target.dataset.tab) {
+          tab = e.target.dataset.tab;
+          sample();
+        }
+      };
+      $("copy").onclick = () => copyText($("sample").textContent);
+      refresh();
+      setInterval(() => {
+        if (!busy && !locked && !document.hidden) refresh();
+      }, 4000);
+    </script>
+  </body>
+</html>
