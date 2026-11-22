@@ -1,227 +1,238 @@
 # AGY ACP Gateway
 
-网关把 Chat Completions 和 Responses 请求转成 `agy acp` 的 stdio JSON-RPC 消息。工具在客户端执行。客户端可以用响应 ID 把结果送回原 ACP 回合，也可以在 Responses 请求中带上完整历史，由新 ACP 会话继续。实现使用 Go 标准库，目标平台为 Linux，Go 版本要求 1.23 或以上。
+将 Google Antigravity CLI（`agy acp`）封装为标准 OpenAI 协议网关，直接兼容 `/v1/chat/completions` 与 `/v1/responses`，并内置轻量化 Web 控制台用于网页完成 Google OAuth 登录与运行监控。
 
-## 下载与许可
+- **双标准接口**：支持 OpenAI **Chat Completions** 与 **Responses API**，完整覆盖流式 SSE、思考/推理内容、Token 与缓存用量统计、多模态图片输入。
+- **客户端工具调用**：通过本地虚拟 MCP 桥实现原生 Function Calling；同时支持 Chat 与 Responses 的完整历史重放（含 `store: false` 无状态续聊、跨会话/跨重启恢复）。
+- **纯净代理环境**：默认自动剥离 `agy` 原生 12KB 编程提示词与内置编码工具，拒绝所有未授权的内置工具调用。
+- **Web 控制台与自动保活**：浏览器内两步完成 Google 登录/切号/登出，支持查看实时状态、Token 用量、一键复制模型 ID 与接入代码，并在空闲时自动静默续期 OAuth 凭据。
+- **零外部依赖**：纯 Go 标准库实现（Linux，Go 1.23+），提供 Docker AIO 一键部署、轻量 slim 镜像及预编译二进制。
 
-[GitHub Releases](https://github.com/RC-CHN/agy-acp-gateway/releases) 提供 Linux amd64 和 arm64 网关压缩包、SHA-256 校验文件，以及可以用 `docker load -i` 导入的 amd64 slim 镜像。下载对应架构的压缩包与 `SHA256SUMS`，在下载目录执行 `sha256sum -c --ignore-missing SHA256SUMS`，解压后运行其中的 `./agy-acp-gateway` 即可启动模拟服务。
+---
 
-```bash
-docker run --rm -p 127.0.0.1:8080:8080 -e GATEWAY_API_KEY \
-  ghcr.io/rc-chn/agy-acp-gateway:v0.1.0 -listen 0.0.0.0:8080
-```
+## 快速开始（推荐 Docker Compose）
 
-上面的镜像命令需要先在 shell 中导出自己的 `GATEWAY_API_KEY`。AIO 的本地构建和账号管理见下文。网关源码采用 MIT 许可证。Google Antigravity CLI 和在线服务有各自的条款，个人版条款对使用第三方软件访问服务有明确限制。接入在线服务前，请确认你的账号和场景具有所需授权。[MIT 许可证](LICENSE) · [Google Antigravity 服务条款](https://www.antigravity.google/terms)
+仓库自带 All-in-One（AIO）镜像构建配置，会自动通过官方安装脚本内置 `agy`，适合绝大多数部署场景。
 
-## 本地启动
-
-在仓库根目录运行以下命令即可使用内置 mock。默认监听 `127.0.0.1:8080`。这个模式使用随网关一起构建的模拟 ACP 子进程。
-
-```bash
-go run -buildvcs=false ./agy_acp_gateway
-```
-
-```bash
-curl -s http://127.0.0.1:8080/ready
-curl -s http://127.0.0.1:8080/v1/models
-curl -N http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"mock","messages":[{"role":"user","content":"hello"}],"stream":true}'
-```
-
-下面是可直接执行的工具回传示例，使用 `jq` 从第一轮提取响应 ID 和工具调用 ID。mock 收到以 `tools:` 开头的文本时会调用请求里注册的所有工具。
-
-```bash
-api=http://127.0.0.1:8080/v1/responses
-first=$(curl -fsS "$api" -H 'Content-Type: application/json' -d '{
-  "model":"mock","input":"tools: weather",
-  "tools":[{"type":"function","name":"get_weather","parameters":{
-    "type":"object","properties":{"city":{"type":"string"}}}}]
-}')
-jq -c '{previous_response_id:.id,input:[.output[]|select(.type=="function_call")|
-  {type:"function_call_output",call_id:.call_id,output:"Shanghai, 18 C"}]}' <<<"$first" |
-  curl -fsS "$api" -H 'Content-Type: application/json' --data-binary @-
-```
-
-## Responses 无状态续聊
-
-每轮传 `store: false`，省略 `previous_response_id`。客户端保留上次的 `input`，把返回的整个 `output` 按顺序追加进去，再追加下一条用户消息或工具结果。JSON 响应取 `output`，SSE 取终态事件里的 `response.output`。这份历史可以用于重试、并发分支，也可以交给刚重启的网关。[OpenAI 会话状态](https://developers.openai.com/api/docs/guides/conversation-state) · [OpenAI 函数调用](https://developers.openai.com/api/docs/guides/function-calling)
-
-下面的 Python 3 示例只需标准库和默认启动的本地 mock。它从第一轮返回的调用中取出 `call_id`，交回结果后会打印包含 `Shanghai, 18 C` 的回答。
-
-```python
-import json
-from urllib.request import Request, urlopen
-
-def respond(history, tools):
-    body = {"model": "mock", "store": False, "input": history, "tools": tools}
-    request = Request("http://127.0.0.1:8080/v1/responses",
-                      data=json.dumps(body).encode(),
-                      headers={"Content-Type": "application/json"})
-    with urlopen(request) as response:
-        return json.load(response)
-
-history = [{"role": "user", "content": "tools: weather"}]
-tools = [{"type": "function", "name": "get_weather",
-          "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]
-while True:
-    response = respond(history, tools)
-    history.extend(response["output"])
-    calls = [item for item in response["output"] if item["type"] == "function_call"]
-    if not calls:
-        print([p["text"] for item in response["output"] if item["type"] == "message"
-               for p in item["content"] if p["type"] == "output_text"])
-        break
-    for call in calls:
-        history.append({"type": "function_call_output", "call_id": call["call_id"],
-                        "output": "Shanghai, 18 C"})
-
-# 下一轮文本续聊可继续使用同一份 history
-history.append({"role": "user", "content": "那明天呢？"})
-next_response = respond(history, tools)
-```
-
-| 本次请求 | 网关行为 |
-| --- | --- |
-| 完整 `input`，`store: false` | 每次新建 ACP 会话，返回后释放网关内存中的会话、待处理调用和 ID 映射。返回的响应 ID 再用于续接会得到 400 |
-| 完整 `input`，`store: true` 或省略 | 按该历史创建独立会话，生成的响应 ID 可用于下一次续接 |
-| `previous_response_id`，`store: true` 或省略 | 按当前网关进程中最新且有效的 ID 续接。只交回原批次工具结果时通过原生 MCP 回调继续。成功后新 ID 取代旧 ID |
-| `previous_response_id`，`store: false` | 从有效父响应的历史另开一次性分支。父 ID 仍按原来的有效期和容量策略管理，分支 ID 用后即失效。没有可供分支使用的槽位时返回 429 |
-
-同一批次的工具结果可乱序回传，使用 `call_id` 配对，每个调用交回一次。无状态请求只带孤立的结果、复用调用 ID、漏交结果或提前插入下一条用户消息都会返回 400。网关重放已有记录时不会执行客户端工具。客户端需要自行保存已执行的结果，有副作用的工具尤其需要避免因 HTTP 重试而重复执行。无状态请求也应带上本轮需要的工具、模型和指令。整份历史受请求体上限约束。
-
-新建的 ACP 会话通过提示内容接收可见的角色、文本、推理摘要、函数参数和结果，图片作为原生图片块送入。原会话的隐藏推理签名、缓存和运行中的工具回调无法从客户端历史恢复。仅含密文的推理项、`item_reference` 和服务端 `conversation` 引用会返回 400。无状态工具轮只保留已交付到 HTTP 响应的调用。需要恢复原生回调或继续等待后续调用时，可使用已保存的响应 ID。`store: false` 的释放范围是本 Go 网关的会话内存，`agy` 自身的文件和上游留存策略另行管理。[OpenAI 推理与无状态模式](https://developers.openai.com/api/docs/guides/reasoning)
-
-## 运行模式
-
-| 模式 | 如何选择 | 行为 |
-| --- | --- | --- |
-| 模拟 ACP | 默认 | 本地 echo、SSE 和工具回传，可以联调客户端 |
-| 真实 ACP 和本地 mock 上游 | `-agy <可执行文件> -mock-ccpa http://127.0.0.1:<端口>` | 使用临时工作区、临时 HOME 和合成凭据。验收脚本会自行启动 mock CCPA |
-| 原生上游 | 显式同时指定 `-agy` 和 `-live` | 由官方 CLI 使用其配置的身份和服务。v0.1.0 已使用 agy 1.5.14 验证 Hydrogen High 的 Chat、Responses 和流式生成 |
-
-真实进程使用 `--process-per-session`。未指定 `-agent` 时，网关会在本次临时工作区内自动生成极简自定义代理 `.agents/agents/gateway-clean.md`（`excludeDefaultComponents: true`、空正文、占位 `vbridge` MCP 声明）并以 `--agent gateway-clean` 启动 `agy acp`：
-- **默认系统提示词**：彻底移除 Antigravity 默认 12KB 编程系统提示词（不套 `<System Prompt>` 包装）。
-- **内置工具**：移除了全部 9 个内置编码/系统工具（`read_file`, `run_command`, `write_file`, `edit_file`, `search_web`, `generate_image`, `schedule`, `send_message`, `ask_question`）。受 `agy` v1.5.14 二进制限制，纯聊天仍保留精确名为 `manage_task` 的底层基础工具，带 MCP 工具时会附带精确名为 `list_resources`、`read_resource` 的 MCP 资源工具（客户端工具本身统一以 `mcp_vbridge_` 前缀暴露）。
-- **残留工具软屏蔽（默认开启）**：网关默认在 ACP `session/new` 的 `systemPrompt.append` 末尾按需追加一句极简提示，严格指明上述精确工具名不可用（纯聊天仅屏蔽 `manage_task`，带工具时屏蔽 `manage_task`、`list_resources`、`read_resource`）。如需恢复严格 0 字节系统提示词透传，可传 `-soft-block-residual-tools=false`。
-- **权限回调兜底**：ACP 请求权限时，只对当前会话已注册的、由 worker 解析出的完整 MCP 工具名（`mcp_vbridge_*`）批准一次；`-agent default`（或账号未开启 `enable-customization-kind-agent` 回退到默认代理）时的内置工具调用仍全部拒绝。显示标题和工具入参不参与授权。如需恢复 `agy` 原生默认代理，可显式传 `-agent default`。
-
-## 兼容范围
-
-| 接口 | 行为 |
-| --- | --- |
-| `POST /v1/chat/completions` | JSON 或 SSE，文本、思考增量、函数调用、用量统计，支持 `stream_options.include_usage` |
-| `POST /v1/responses` | JSON 或语义 SSE，支持完整历史重放、`store: false`、`previous_response_id`、函数结果、推理摘要、终态和递增事件序号 |
-| `GET /v1/models` | 返回实际 ACP 模型目录和可用别名 |
-| `GET /health`、`GET /ready` | 返回进程状态和会话计数。worker 初始化中或容量已满时，ready 返回 503 |
-
-- Chat 按显式会话键或首条用户消息等字段定位候选会话，再检查完整历史前缀。修改历史、系统指令或工具定义会重建上下文；工具结果回传优先命中原生挂起 MCP 回调，若原会话已过期、被回收或跨网关重启，则在校验完整 `tool_calls`/`tool` 配对后自动折叠历史重建会话继续。
-- Responses 支持从会话最新响应继续。旧分支、过期 ID 和未知 ID 返回 400。普通新回合省略 `instructions` 时会去掉上一轮指令。等待工具结果期间，原 ACP 回合保持原有设置。
-- 同一会话同时处理一个客户端请求，竞争请求返回 429。有状态模式下，等待工具的会话释放 HTTP 请求占用，同时保留 ACP 回合和已公布的调用 ID。工具结果可乱序提交。缺失、重复或未知 ID 返回 400，客户端可以更正后重试。
-- 在 40 ms 窗口内到达的并行调用合并返回。有状态回合中较晚到达的调用可在下一次结果回传后继续交付。工具等待超时、客户端中途断开、子进程退出时会清理关联状态。工具挂起这一段还没有最终 ACP usage。
-- 支持 PNG、JPEG、WebP、GIF 的 base64 data URL。每请求图片解码后的总量上限为 20 MiB，远程图片 URL 返回 400。Chat 的 `reasoning_content` 是扩展字段。Responses 通过 `reasoning_summary_text` 事件输出摘要。
-- system、developer 和 instructions 使用 ACP 的系统指令追加功能。思考等级按会话返回的选项选择。ACP 未提供的采样参数（例如 `temperature`、`top_p`、`max_output_tokens` 和 `stop`）不会约束生成。这一版工具接口支持 `type: function`。
-
-## 配置与运行
-
-可用 `go run -buildvcs=false ./agy_acp_gateway -h` 查看参数。常用配置包括 `GATEWAY_API_KEY`、`-model-map '{"alias":"实际模型 ID"}'`、`-max-concurrent-turns`（8）、`-max-sessions`（64）、`-session-idle-ttl`（20m）、`-tool-timeout`（5m）、`-turn-timeout`（15m）、`-body-limit`（32 MiB）和 `-cors-origins`。网关的结构化请求日志记录请求标识、端点、状态与耗时，省略正文和图片。
-
-### AIO 镜像、Dashboard 与环境变量
-
-Dockerfile 和 Compose 默认构建 AIO。构建阶段从官方安装器下载当前平台的 agy，由安装器校验发布载荷，再检查最终 ELF 和版本。可以用 `AGY_EXPECTED_VERSION` 和 `AGY_EXPECTED_SHA256` 锁定验收值。需要查询最新清单时可用 `docker buildx build --no-cache-filter agy-fetch --load -t agy-acp-gateway:aio .`。自建安装源可显式配置 `AGY_INSTALL_URL`。[官方安装器](https://antigravity.google/cli/install.sh) · [Dockerfile](Dockerfile)
-
-Compose 读取宿主机已导出的环境变量和项目根目录的 `.env`，同名项以宿主机环境为准。复制示例后填入自己的网关密钥，再按需要启用代理。[环境变量示例](.env.example) · [Compose 配置](docker-compose.yml)
+### 1. 配置环境变量
 
 ```bash
 cp .env.example .env
-# 编辑 .env，设置 GATEWAY_API_KEY，再构建
-docker compose build
 ```
 
-| 变量 | 用途 |
-| --- | --- |
-| `GATEWAY_API_KEY` | 网关 Bearer 密钥，Compose 必填。用于 Dashboard 和两个模型 API 的本地鉴权。仅传入运行容器 |
-| `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` | Compose 同时传给构建阶段和运行容器。支持对应小写形式。原生 worker 和登录子进程继承代理，自动将两份 NO_PROXY 规则合并并补齐回环地址 |
-| `GATEWAY_CREDENTIAL_MODE` | 默认 `managed`，允许网页登录、切号和登出。`external` 适用于由宿主机维护的只读凭据，四个认证写接口返回 403 |
-| `GATEWAY_AUTH_KEEPALIVE_INTERVAL` | 已登录的 managed 实例默认每空闲 `30m` 检查一次。可填 `15m` 等 Go 时长，`0` 关闭后台检查。命令行参数为 `-auth-keepalive-interval` |
-| `AGY_DATA_VOLUME` | Compose 默认使用当前项目的 `<项目名>_agy-data` 命名卷。更改项目名或部署目录时，填原卷的实际名称即可继续使用其中的登录态 |
-| `GATEWAY_STATUS_OBSERVER` | Linux amd64 镜像默认 `frida`，也可选 `store` 或 `off`。裸二进制默认直接使用 ACP。观测范围与版本要求见下文 |
-| `GATEWAY_DASHBOARD` | 默认 `true`。`false` 关闭首页和管理路由。直接运行二进制可用 `-credential-mode`、`-dashboard` 覆盖相应环境变量 |
-| `AGY_EXPECTED_VERSION`、`AGY_EXPECTED_SHA256` | 可选构建参数。摘要为目标架构最终 ELF 的 SHA-256，版本或摘要不一致会令构建失败 |
+编辑 `.env`，至少填写一个你自定义的网关密钥（访问控制台和 OpenAI API 时使用）：
 
-代理 URL 应从构建容器及运行容器可达。例如可以设置 `HTTPS_PROXY=http://proxy.internal.example:3128`。容器内的 `127.0.0.1` 指向容器自身。原生 CLI 登录后负责上游 Google 凭据，`GATEWAY_API_KEY` 只用于访问本地网关。
+```dotenv
+GATEWAY_API_KEY=your-secret-gateway-key
 
-**先离线体验。** 以下命令用内置 mock 启动同一份 Dashboard 和模型接口。打开 `http://127.0.0.1:8080/`，输入网关密钥即可查看状态、计数和接入示例。
+# 如果容器访问 Google 需要代理，取消注释并填入容器可达的代理地址
+# HTTPS_PROXY=http://proxy.example:3128
+# HTTP_PROXY=http://proxy.example:3128
+# ALL_PROXY=socks5://proxy.example:1080
+```
+
+> 容器内的 `127.0.0.1` 指向容器自身。如果代理运行在宿主机，请使用宿主机局域网 IP 或 Docker 网桥地址。
+
+### 2. 构建并启动
 
 ```bash
-docker compose run --rm --service-ports acp-gateway -listen 0.0.0.0:8080
+docker compose up -d --build
 ```
 
-**确认启用真实上游后**，执行 `docker compose up -d`。容器默认以 UID 65532 运行，仅在宿主机回环发布 8080，`agy-data` 命名卷持久化 `/data`。网页登录时点“开始 Google 登录”，在官方页面授权后把授权码或回调 URL 粘回 Dashboard，再等待 ACP 就绪。已有账号时，取消切号会保留原会话。提交新授权或登出会终止旧会话，旧的 Responses ID 和工具回调随即失效。单文件凭据挂载应设置 `GATEWAY_CREDENTIAL_MODE=external`，挂载位置为 `/data/.gemini/antigravity-cli/antigravity-oauth-token`。该文件须对运行 UID 可读，父目录须可写，以便 CLI 创建缓存。
+默认仅监听宿主机 `127.0.0.1:8080`，登录态持久化在 Docker 命名卷 `agy-data`（挂载到容器 `/data`）中。
 
-**空闲时也会续期。** 已保存登录的 managed 网关就绪后，即使从启动起一直没有客户端请求，也会定时启动一个短生命周期的原生 agy 会话。agy 按需刷新 OAuth 并将轮换后的凭据写回自己的存储。检查可能经配置的代理访问认证和模型目录服务，模型生成次数与用量均为零。在途请求和待回传的工具调用会推迟检查。检查失败后自动退避重试，默认从 1 分钟开始，最长 30 分钟。正常请求仍能触发 agy 自身的续期。上游撤销授权后需要重新授权。
+> 如果想先不连外网离线体验，可用内置 mock 启动同一套控制台和接口：
+> ```bash
+> docker compose run --rm --service-ports acp-gateway -listen 0.0.0.0:8080
+> ```
 
-重建或替换 AIO 容器时保留同一个可写的 `/data` 卷。直接用 `docker run` 启动时，在每次启动命令中使用相同的 `-v agy-data:/data`。`docker compose down -v` 会删除 Compose 管理的卷及其中的登录态。使用 external 单文件只读挂载时，刷新凭据的持久化由宿主机负责。Responses ID 的空闲寿命由独立的 `-session-idle-ttl` 控制，默认 20 分钟。
+### 3. 在网页完成 Google 登录
 
-管理状态入口为 `GET /admin/api/status`。其中 `auth.keepalive_enabled` 表示是否启用空闲检查，`last_silent_check_at` 和 `last_silent_check_error` 分别记录最近一次完成检查的时间和诊断码。Dashboard 仅将密钥保存在当前标签页的 sessionStorage。等待账号认证时 `/health` 返回 200，`/ready` 和模型接口返回 503。统计覆盖 JSON、SSE、输入错误和客户端断连。工具回合只按 ACP 最终报告的 usage 累计一次，进程重启会清空计数。
+1. 浏览器打开 `http://127.0.0.1:8080/`，输入 `.env` 中设置的 `GATEWAY_API_KEY` 解锁控制台。
+2. 点击 **「开始 Google 登录」** -> 打开官方授权页完成授权。
+3. 将回调页面显示的**授权码**或**完整回调 URL** 粘贴回输入框并点击 **「完成登录」**。
+4. 等待顶部状态变为 **「就绪」**，即可使用 OpenAI 客户端接入。
 
-Compose 使用本机镜像标签 `agy-acp-gateway:aio`。编译阶段默认镜像是 `golang:1.26-bookworm`，本地可通过 `GO_BUILD_IMAGE` 选择缓存的 Go 1.26 构建镜像。
+### 4. 客户端调用示例
 
-轻量镜像可用 `docker build --target slim -t agy-acp-gateway:slim .` 构建，默认运行内置 mock。直接使用 `docker run` 时可以用 `--env-file .env` 或 `-e GATEWAY_API_KEY -e HTTPS_PROXY -e NO_PROXY` 传入配置。
+**Python（OpenAI SDK）**
 
-已在宿主机安装兼容的 Linux agy 时，也可以让发布的 slim 镜像运行该 CLI。以下示例使用独立的可写数据目录；`GATEWAY_API_KEY` 应已导出，`HTTPS_PROXY` 与 `NO_PROXY` 按部署环境设置。
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8080/v1",
+    api_key="your-secret-gateway-key",
+)
+
+# Responses API
+resp = client.responses.create(
+    model="MODEL_ID",  # 可在控制台点击模型标签直接复制
+    input="你好，简单介绍一下你自己",
+)
+print(resp.output_text)
+
+# Chat Completions API
+chat = client.chat.completions.create(
+    model="MODEL_ID",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(chat.choices[0].message.content)
+```
+
+**cURL**
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-secret-gateway-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "MODEL_ID",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'
+```
+
+---
+
+## 其他部署方式
+
+### 预编译二进制 / 源码运行
+
+从 [GitHub Releases](https://github.com/RC-CHN/agy-acp-gateway/releases) 下载对应架构（Linux `amd64` / `arm64`）的压缩包，或在本地使用 Go 1.23+ 直接运行：
+
+```bash
+# 连接本机已安装的真实 agy（使用本机登录态，或通过网页控制台登录）
+GATEWAY_API_KEY=your-key ./agy-acp-gateway \
+  -listen 127.0.0.1:8080 \
+  -agy "$(command -v agy)" \
+  -live
+
+# 不传 -agy 则启动内置离线 Mock 模式，方便客户端联调
+go run -buildvcs=false ./agy_acp_gateway
+```
+
+> 监听非回环地址（如 `0.0.0.0:8080`）时，网关会强制要求设置 `GATEWAY_API_KEY`（或 `-api-key`）。
+
+### 轻量 slim 镜像 + 宿主机 `agy`
+
+如果宿主机已经安装了兼容的 Linux `agy`，可以直接拉取发布的轻量镜像并挂载宿主机二进制和独立状态目录：
 
 ```bash
 state="${XDG_DATA_HOME:-$HOME/.local/share}/agy-acp-gateway"
 install -d -m 700 "$state"
-docker run --rm --init --user "$(id -u):$(id -g)" -p 127.0.0.1:8080:8080 \
-  -v "$(realpath "$(command -v agy)"):/usr/local/bin/agy:ro" -v "$state:/data" \
-  -e HOME=/data -e GATEWAY_API_KEY -e HTTPS_PROXY -e NO_PROXY \
-  ghcr.io/rc-chn/agy-acp-gateway:v0.1.0 -listen 0.0.0.0:8080 -agy /usr/local/bin/agy -live
+
+docker run --rm --init --user "$(id -u):$(id -g)" \
+  -p 127.0.0.1:8080:8080 \
+  -v "$(realpath "$(command -v agy)"):/usr/local/bin/agy:ro" \
+  -v "$state:/data" \
+  -e HOME=/data \
+  -e GATEWAY_API_KEY \
+  -e HTTPS_PROXY -e NO_PROXY \
+  ghcr.io/rc-chn/agy-acp-gateway:v0.1.0 \
+  -listen 0.0.0.0:8080 -agy /usr/local/bin/agy -live
 ```
 
+也可以本地自行构建 slim 镜像：`docker build --target slim -t agy-acp-gateway:slim .`。
 
-## 离线验收
+---
+
+## 接口与能力说明
+
+### 端点一览
+
+| 端点 | 说明 |
+| --- | --- |
+| `POST /v1/chat/completions` | Chat Completions（JSON / SSE、思考增量 `reasoning_content`、Function Calling、Token 用量、`stream_options.include_usage`） |
+| `POST /v1/responses` | Responses API（JSON / 语义 SSE、推理摘要、Function Calling、`previous_response_id` 续聊、`store: false` 无状态重放） |
+| `GET /v1/models` | 返回当前可用的 ACP 模型列表及自定义别名 |
+| `GET /` | 内置 Web 控制台（API Key 鉴权，仅存于当前标签页 `sessionStorage`） |
+| `GET /health`、`GET /ready` | 存活与就绪探针（未登录或并发已满时 `/ready` 返回 `503`） |
+
+### 使用须知
+
+- **纯净代理与安全隔离**：未显式指定 `-agent` 时，网关会自动在临时工作区生成极简配置 `gateway-clean`，移除 `agy` 默认的 12KB 编程提示词和全部内置编码工具，仅放行客户端注册的工具调用（如需恢复 `agy` 原生默认代理可传 `-agent default`）。
+- **工具调用与无状态续聊**：
+  - 所有工具均在客户端本地执行，网关负责把模型的工具调用透传出来并等待回传结果。
+  - **有状态模式**（Chat 多轮 / Responses `previous_response_id`）：优先命中原 ACP 会话的原生 MCP 回调继续执行；同一批次并行调用会合并返回，结果可乱序回传。
+  - **无状态与重放兜底**（Responses `store: false` 或 Chat 跨重启/过期会话）：携带完整对话及工具历史即可由新会话自动重放继续，不会重复触发客户端工具。
+- **图片输入**：支持 PNG、JPEG、WebP、GIF 的 base64 data URL，单次请求解码总大小上限 20 MiB；暂不支持远程图片 URL。
+- **协议限制**：
+  - 工具目前仅支持 `type: function`（不支持服务端托管工具）。
+  - ACP 协议本身不支持的采样参数（如 `temperature`、`top_p`、`max_output_tokens`、`stop`）不会限制模型输出。
+  - 无状态重放仅透传可见文本、推理摘要、工具调用与结果、图片，无法恢复上游隐藏推理签名或 KV 缓存。
+- **错误响应与上游状态码还原**：
+  - 所有生成接口都会返回 `X-Request-Id` 与结构化 JSON 错误（SSE 开流后的错误以错误帧 / `response.failed` 结束）。
+  - Linux `amd64` 镜像默认内置状态码观测（`GATEWAY_STATUS_OBSERVER=frida`），可将 `agy` 吞掉的上游 `401` / `403` / `429` 等错误精确还原为标准 HTTP 状态码与 `Retry-After`；不需要时可设为 `store`（只读本地会话库）或 `off`。
+
+---
+
+## 登录态持久化与自动保活
+
+- **数据卷持久化**：Docker Compose 默认将凭据保存在命名卷 `agy-data`（容器内 `/data`）。重建容器会保留登录态，**注意 `docker compose down -v` 会删除卷并清空登录信息**。修改项目目录或项目名时，可在 `.env` 中设置 `AGY_DATA_VOLUME=<旧卷名>` 复用原有登录态。
+- **空闲自动保活**：在 `managed` 模式下，网关空闲时默认每 `30m` 静默检查一次登录态（不触发模型生成，零 Token 消耗），自动刷新并持久化 OAuth Token。可通过 `GATEWAY_AUTH_KEEPALIVE_INTERVAL=0` 关闭。
+- **宿主机只读凭据模式**：如果你希望完全由宿主机维护登录态、禁止通过网页登录/登出，可设置 `GATEWAY_CREDENTIAL_MODE=external`，并将凭据文件挂载到 `/data/.gemini/antigravity-cli/antigravity-oauth-token`（确保运行 UID `65532` 可读，父目录可写）。
+
+---
+
+## 常用配置
+
+### 环境变量
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `GATEWAY_API_KEY` | 无（Compose 必填） | 访问 API 与 Web 控制台的 Bearer 密钥 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` | 空 | 代理设置（Compose 会同时用于构建和运行阶段，支持小写） |
+| `GATEWAY_DASHBOARD` | `true` | 是否启用内置 Web 控制台和管理接口 |
+| `GATEWAY_CREDENTIAL_MODE` | `managed` | `managed` 允许网页登录/切号/登出；`external` 禁用网页认证写操作 |
+| `GATEWAY_AUTH_KEEPALIVE_INTERVAL` | `30m` | 已登录状态下的空闲静默保活间隔，`0` 表示关闭 |
+| `GATEWAY_STATUS_OBSERVER` | `frida`（amd64 镜像） | 上游状态码观测模式：`frida` / `store` / `off` |
+| `AGY_DATA_VOLUME` | `<项目名>_agy-data` | 指定复用的 Docker 数据卷名称 |
+| `AGY_EXPECTED_VERSION` / `AGY_EXPECTED_SHA256` | 空 | 可选构建参数，用于构建 AIO 镜像时校验 `agy` 版本与 ELF SHA-256 |
+
+### 命令行参数
+
+完整列表可执行 `./agy-acp-gateway -h` 查看，常用参数如下：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-listen` | `127.0.0.1:8080` | HTTP 监听地址 |
+| `-agy` | 空（内置 mock） | 真实 `agy` 可执行文件路径 |
+| `-live` | `false` | 启用真实上游服务（需配合 `-agy`） |
+| `-api-key` | 读取 `GATEWAY_API_KEY` | Bearer 鉴权密钥 |
+| `-model-map` | `{}` | 模型别名映射，例如 `'{"gpt-4o":"实际模型ID"}'` |
+| `-agent` | `gateway-clean` | 指定 ACP Agent；传 `default` 可恢复 `agy` 原生代理 |
+| `-soft-block-residual-tools` | `true` | 软屏蔽 `agy` 无法从底层移除的残留内置工具名 |
+| `-max-sessions` | `64` | 最大内存会话数 |
+| `-max-concurrent-turns` | `8` | 最大并发执行回合数 |
+| `-session-idle-ttl` | `20m` | 空闲会话过期时间 |
+| `-tool-timeout` | `5m` | 等待客户端回传工具结果的超时时间 |
+| `-turn-timeout` | `15m` | 单回合最大超时时间 |
+| `-body-limit` | `32 MiB` | HTTP 请求体大小上限 |
+| `-cors-origins` | 空 | 允许的 CORS Origin（逗号分隔） |
+
+---
+
+## 开发与离线测试
+
+仓库测试均在完全离线环境下运行，不会向真实 Google 服务发起请求：
 
 ```bash
+# 1. Go 静态检查与竞态单元测试
 ./scripts/verify_acp_gateway.sh
+
+# 2. 使用本地真实 agy + 离线 Mock CCPA 集成测试（可指定 AGY_REAL_BINARY）
 ./scripts/verify_acp_gateway.sh --real
+
+# 3. 本地构建 AIO / slim 镜像后执行离线容器验收
+./scripts/verify_aio.sh
+./scripts/verify_aio.sh --native   # Linux amd64 原生观测验收
 ```
 
-第一条命令执行 vet 和带竞态检测的测试，覆盖协议、错误输入、并发、分支、超时、断开、TTL/LRU、worker 被强杀后的 502 和恢复。测试使用 Go 管道和内存 HTTP 传输。第二条另行编译 CLI 和测试程序，在只有回环接口的 Linux 环境中使用本地 `agy` 二进制（可通过 `AGY_REAL_BINARY` 指定，未指定时使用 `PATH` 中的 `agy`）。在普通 Linux 主机上脚本通过 `unshare` 建立临时网络命名空间，需要系统支持非特权用户命名空间和 `ip`。也可以在已有的离线测试环境中直接运行。
+---
 
-真实二进制用例核对发送给 mock CCPA 的模型请求与工具结果，包括多轮 sessionId、系统指令、图片字节、缓存 token、两个 API 的工具回传和 SSE。验收还会启动完整网关 CLI，分别发送 SIGINT 和 SIGTERM，检查子进程已被回收。无状态重启用例在第一个网关进程取得工具调用，关闭进程后，用新的网关、真实 `agy` 和独立 HOME 重放。mock CCPA 检查收到的实际会话 ID、函数参数、结果和图片，并按客户端提交的值作答。全部验收使用合成身份和本地结果。
+## 许可与免责声明
 
-v1.5.14 联调中的三个细节直接影响工具能否工作。mock 的 `listExperiments` 返回启用 `enable-customization-kind-mcp` 和 `enable-customization-kind-agent` 的配置。桥在工具定义的 `_meta` 中声明 `antigravity/alwaysLoad: true`。模拟模型也要遵循实际声明的参数，包含 `agy` 添加的 `toolSummary`。最终验证既检查客户端收到的原始函数名与参数，也检查客户端结果进入下一次模型请求的 `functionResponse`。
+本项目源码基于 [MIT License](LICENSE) 开源。
 
-### 两个生成接口的错误响应
-
-Chat Completions 和 Responses 会在鉴权及解析之前生成 `X-Request-Id`。非流式失败，以及开流前的失败，使用对应的 HTTP 状态，JSON 的 `error` 对象包含 `code`、`type`、`message`、`param`。`code` 是稳定的机器码，旧客户端若比较 `Bad Request` 等 HTTP 短语，需要改用机器码或整数 HTTP 状态。工具历史错误的 `param` 指向 `messages` 或 `input`，失效的续聊 ID 指向 `previous_response_id`。
-
-已提交 SSE 响应头时，HTTP 状态保持 200。Chat 在错误帧后发送一次 `[DONE]`。Responses 以 `response.failed` 结束，保留响应 ID、序号和已有输出，SDK 可以读取 `response.error`，扩展字段 `gateway_error.status` 与 `gateway_error.error` 给出逻辑 HTTP 状态和完整错误。原生 ACP 错误使用 `error.upstream.acp_code` 保留有符号数值，认证失败 `-32000` 对外为 503 / `acp_auth_required`。客户端仍连接时，agy 主动取消会产生 502 / `acp_request_cancelled`；网关自己超时为 504 / `upstream_timeout`。认证等待期间 `/health` 保持 200，`/ready` 返回 503，两者都有 `auth_required`。[分类实现](agy_acp_gateway/errors.go) · [接口验收](agy_acp_gateway/error_contract_test.go)
-
-### 模型服务错误映射
-
-Linux amd64 的 slim 和 AIO 镜像内置 Frida 17.27.4。网关启动原生 agy 时默认启用精确状态码观测。本版探针对应 agy 1.5.14 的 amd64 ELF，SHA-256 为 `37873b8062391b6202a3d3199ec012abc9e53aab720d26cd65699441497d8c94`。网关只观测自己启动的该版本模型会话子进程。认证、登出和空闲刷新仍走普通 ACP。arm64 或未识别的 CLI 使用原生 ACP 错误。
-
-当 agy 将提供方错误转换成助手消息时，网关核对本回合的终态与错误来源。例如模型权限拒绝返回 HTTP 403 及 `upstream_permission_denied`，上游 401 返回 503 及 `upstream_auth_failed`。原始 HTTP 码见 `error.upstream.provider_http_status`。其中 `observation_source=frida` 表示数值由内存探针确认，`trajectory_store` 表示由本地只读会话库独立核实。若精确匹配不可用，保留 ACP 的实际返回。已确认的提供方枚举和重试时间分别在 `error.upstream.provider_status`、`error.retry_after_s`。可写 HTTP 头时也会返回 `Retry-After`。
-
-`GATEWAY_STATUS_OBSERVER=store` 可单独使用 Python 3.11+ 的 sqlite3 只读会话库观测，`off` 可关闭镜像自动观测。裸二进制可显式指定 `-agy-frida-python /path/to/python` 或 `-agy-status-python /path/to/python3`。Frida 插桩在历史压力测试中出现过 worker 异常退出，业务请求不会自动重发。[Go 分类](agy_acp_gateway/observed_error.go) · [观测适配器](agy_acp_gateway/observer/bridge.py)
-
-在 Linux amd64 上构建两个镜像后，运行 `./scripts/verify_aio.sh --native` 可在无外网的 AIO 容器里验证镜像默认模式，包含对 Frida 来源、403、429、成功重试、两种 SSE 和超时的断言。宿主机离线验收也可以通过 `AGY_STATUS_PYTHON`、`AGY_FRIDA_PYTHON` 指定解释器。
-
-### 本次验收结果（2026-11-22）
-
-| 检查 | 结果 |
-| --- | --- |
-| Go 静态检查和竞态测试 | `go vet` 通过，`go test -race -shuffle=on -count=10 -cover ./...` 通过。该次 mock 测试的语句覆盖率为 80.5% |
-| 真实 `agy` v1.5.14 + mock CCPA | 带竞态检测的离线集成测试连续通过 3 次，覆盖两套 API 的工具回传和 SSE、无状态跨进程重放、同一调用的独立分支和连续两轮工具调用 |
-| 权限回调 | 实际发起的内置 `write_file` 和 `run_command` 均被拒绝，临时目录中的检测文件未生成 |
-| 完整 CLI | 默认 mock 模式可启动、处理 HTTP 请求，并在 SIGINT 和 SIGTERM 后回收子进程 |
-| Dashboard | Chromium 桌面与 375px 移动宽度验证了解锁、刷新、示例复制和账号操作。登录表单使用合成事务，真实 CLI 在隔离环境验证了生成授权页和取消 |
-| Docker | 已从官方安装器构建 Linux amd64 AIO，并构建 slim。`./scripts/verify_aio.sh` 对本地 `agy-acp-gateway:aio`、`agy-acp-gateway:slim` 两个镜像执行无外网验收，覆盖 UID、数据卷、外部只读挂载、健康检查和网关鉴权配置 |
-
-
-## 持续集成与发布
-
-推送到 main 和提交 PR 会运行最低支持的 Go 1.23 及 Go 1.26 的静态检查、竞态测试、Compose 配置校验和独立二进制 HTTP 冒烟测试。Chromium 另行验证 Dashboard 的桌面和手机布局、剪贴板、授权倒计时以及刷新页面后的登录恢复。在 Actions 的 CI 页面勾选 `native` 可另外构建 AIO 与 slim 并用临时身份执行原生 CLI 离线验收。推送形如 `v0.1.0` 的版本标签会先运行 CI 与 amd64 原生镜像验收，再发布 Linux 二进制、校验和和 slim 容器。[CI 工作流](.github/workflows/ci.yml) · [发布工作流](.github/workflows/release.yml)
+本项目仅作为本地 CLI 协议转换层；Google Antigravity CLI 及在线服务受其各自条款约束，使用前请确保你的账号及使用场景符合 [Google Antigravity 服务条款](https://www.antigravity.google/terms)。
