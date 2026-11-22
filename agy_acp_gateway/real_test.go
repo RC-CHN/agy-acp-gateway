@@ -211,6 +211,16 @@ func TestRealACP(t *testing.T) {
 	}
 	api := httptest.NewServer(g)
 	defer api.Close()
+	catalog := invoke(ctx, g, "GET", "/v1/models", "", nil)
+	var models struct {
+		Data []modelInfo `json:"data"`
+	}
+	if catalog.Code != 200 || json.Unmarshal(catalog.Body.Bytes(), &models) != nil || len(models.Data) == 0 {
+		t.Fatal("native model catalog unavailable", catalog.Body.String())
+	}
+	if models.Data[0].Name == "" || models.Data[0].Name == models.Data[0].ID {
+		t.Fatal("missing native model display name", models.Data)
+	}
 	post := func(body obj) obj {
 		t.Helper()
 		res, err := http.Post(api.URL+"/v1/responses", "application/json", strings.NewReader(enc(body)))

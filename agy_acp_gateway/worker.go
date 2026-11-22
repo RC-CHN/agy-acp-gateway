@@ -18,6 +18,7 @@ import (
 
 type command struct {
 	observeStatus bool
+	observerMode  string
 	bin           string
 	args, env     []string
 	dir           string
@@ -156,9 +157,10 @@ func (g *gateway) requireAuth(p *peer, f *failure) {
 
 type acpProcess struct {
 	*peer
-	stdout *os.File
-	exited <-chan struct{}
-	close  func()
+	version string
+	stdout  *os.File
+	exited  <-chan struct{}
+	close   func()
 }
 
 // Both the supervisor and explicit logout use the same native ACP lifecycle.
@@ -226,6 +228,7 @@ func (p *acpProcess) initialize(ctx context.Context) error {
 	if fmt.Sprint(v["protocolVersion"]) != "1" {
 		return errors.New("unsupported ACP protocol version")
 	}
+	p.version = str(asObj(v["agentInfo"])["version"])
 	return nil
 }
 
@@ -241,7 +244,7 @@ func runProcess(ctx context.Context, c command, g *gateway) (time.Duration, erro
 	if err := proc.initialize(boot); err != nil {
 		return 0, err
 	}
-	models, defaultModel, err := g.discoverModels(boot, p)
+	info, err := g.discoverModels(boot, p)
 	if err != nil {
 		return 0, err
 	}
@@ -254,8 +257,31 @@ func runProcess(ctx context.Context, c command, g *gateway) (time.Duration, erro
 	g.worker = p
 	g.authError = nil
 	g.hadLogin, g.retryingAuth = true, false
-	g.catalog = models
-	g.defaultModel = defaultModel
+	g.catalog = nil
+	g.modelDetails = map[string]modelInfo{}
+	g.version, g.observerMode = proc.version, c.observerMode
+	if g.observerMode == "" {
+		g.observerMode = "acp-only"
+	}
+	g.lastObservation = ""
+	models := asObj(info["models"])
+	g.defaultModel = str(models["currentModelId"])
+	for _, x := range arr(models["availableModels"]) {
+		m := asObj(x)
+		id := str(m["modelId"])
+		if _, exists := g.modelDetails[id]; id != "" && !exists {
+			g.catalog = append(g.catalog, id)
+			g.modelDetails[id] = modelInfo{Name: str(m["name"])}
+		}
+	}
+	g.updateThoughtLevelsLocked(g.defaultModel, arr(info["configOptions"]))
+	tier := asObj(asObj(info["_meta"])["antigravity"])["tier"]
+	g.tier = str(tier)
+	for _, field := range []string{"name", "displayName", "id"} {
+		if g.tier == "" {
+			g.tier = str(asObj(tier)[field])
+		}
+	}
 	g.lastModelUse = start
 	g.mu.Unlock()
 	if g.authKeepaliveEnabled() {
@@ -297,26 +323,22 @@ func runProcess(ctx context.Context, c command, g *gateway) (time.Duration, erro
 
 // Opening a native session runs agy's silent credential restore, including its
 // refresh-and-save path when due. No generation or interactive login is used.
-func (g *gateway) discoverModels(boot context.Context, p *peer) ([]string, string, error) {
+func (g *gateway) discoverModels(boot context.Context, p *peer) (obj, error) {
 	info, err := p.call(boot, "session/new", obj{"cwd": g.cfg.cwd, "mcpServers": []any{}, "_meta": obj{"disableBuiltInTools": true}})
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	id := str(info["sessionId"])
 	if id == "" {
-		return nil, "", errors.New("model discovery returned no session ID")
-	}
-	var models []string
-	for _, x := range arr(asObj(info["models"])["availableModels"]) {
-		if m := str(asObj(x)["modelId"]); m != "" {
-			models = append(models, m)
-		}
+		return nil, errors.New("model discovery returned no session ID")
 	}
 	closeSession(p, id)
-	if len(models) == 0 {
-		return nil, "", errors.New("empty ACP model catalog")
+	for _, x := range arr(asObj(info["models"])["availableModels"]) {
+		if str(asObj(x)["modelId"]) != "" {
+			return info, nil
+		}
 	}
-	return models, str(asObj(info["models"])["currentModelId"]), nil
+	return nil, errors.New("empty ACP model catalog")
 }
 
 func (g *gateway) authKeepaliveEnabled() bool {
@@ -383,7 +405,7 @@ func (g *gateway) checkSavedLogin(ctx context.Context) error {
 	if err = proc.initialize(ctx); err != nil {
 		return err
 	}
-	_, _, err = g.discoverModels(ctx, proc.peer)
+	_, err = g.discoverModels(ctx, proc.peer)
 	return err
 }
 

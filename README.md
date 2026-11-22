@@ -129,7 +129,7 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
   -e HOME=/data \
   -e GATEWAY_API_KEY \
   -e HTTPS_PROXY -e NO_PROXY \
-  ghcr.io/rc-chn/agy-acp-gateway:v0.1.0 \
+  ghcr.io/rc-chn/agy-acp-gateway:v0.1.1 \
   -listen 0.0.0.0:8080 -agy /usr/local/bin/agy -live
 ```
 
@@ -145,17 +145,25 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
 | --- | --- |
 | `POST /v1/chat/completions` | Chat Completions（JSON / SSE、思考增量 `reasoning_content`、Function Calling、Token 用量、`stream_options.include_usage`） |
 | `POST /v1/responses` | Responses API（JSON / 语义 SSE、推理摘要、Function Calling、`previous_response_id` 续聊、`store: false` 无状态重放） |
-| `GET /v1/models` | 返回当前可用的 ACP 模型列表及自定义别名 |
+| `GET /v1/models` / `GET /v1/models/{id}` | 列出或查询可用模型，返回 `id`、原生显示名 `name`、已知的 `reasoning_efforts` 和别名对应的 `canonical_id` |
+| `GET /metrics` | 可选的 Prometheus 指标，带 Bearer 鉴权（`-metrics`） |
 | `GET /` | 内置 Web 控制台（API Key 鉴权，仅存于当前标签页 `sessionStorage`） |
 | `GET /health`、`GET /ready` | 存活与就绪探针（未登录或并发已满时 `/ready` 返回 `503`） |
+
+模型列表和单模型接口都沿用生成 API 的密钥。用 `id` 发请求，`name` 可直接用于界面显示。模型显示名来自 ACP 模型目录。思考档位来自该模型的 ACP 配置，当前模型会在启动时采集，其他模型在 ACP 实际返回该模型配置后补充。
+
+```bash
+curl -fsS "$BASE_URL/v1/models" -H "Authorization: Bearer $GATEWAY_API_KEY"
+curl -fsS "$BASE_URL/v1/models/$MODEL_ID" -H "Authorization: Bearer $GATEWAY_API_KEY"
+```
 
 ### 使用须知
 
 - **纯净代理与安全隔离**：未显式指定 `-agent` 时，网关会自动在临时工作区生成极简配置 `gateway-clean`，移除 `agy` 默认的 12KB 编程提示词和全部内置编码工具，仅放行客户端注册的工具调用（如需恢复 `agy` 原生默认代理可传 `-agent default`）。
 - **工具调用与无状态续聊**：
   - 所有工具均在客户端本地执行，网关负责把模型的工具调用透传出来并等待回传结果。
-  - **有状态模式**（Chat 多轮 / Responses `previous_response_id`）：优先命中原 ACP 会话的原生 MCP 回调继续执行；同一批次并行调用会合并返回，结果可乱序回传。
-  - **无状态与重放兜底**（Responses `store: false` 或 Chat 跨重启/过期会话）：携带完整对话及工具历史即可由新会话自动重放继续，不会重复触发客户端工具。
+  - **有状态模式**（Chat 多轮 / Responses 默认 `store: true`）：可以使用 `previous_response_id` 续接 Responses，也可以发送完整的历史。网关先用 `prompt_cache_key`、`X-Session-Id`、`X-Conversation-Id` 或首轮指纹找候选，再核对上下文前缀。同一用户或显式键下的多个对话分支可独立复用会话。工具调用批次可乱序回传。
+  - **无状态与重放兜底**（Responses `store: false` 或 Chat 跨重启/过期会话）：携带完整对话及工具历史即可由新会话自动重放继续，不会重复触发客户端工具。 开启 `-cache-stateless-responses` 后，完整历史也可复用由同类请求留下的 ACP 会话。会话遵循 TTL 和容量限制，非存储响应的 ID 仍不可查询或续接。
 - **图片输入**：支持 PNG、JPEG、WebP、GIF 的 base64 data URL，单次请求解码总大小上限 20 MiB；暂不支持远程图片 URL。
 - **协议限制**：
   - 工具目前仅支持 `type: function`（不支持服务端托管工具）。
@@ -186,6 +194,7 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
 | `GATEWAY_DASHBOARD` | `true` | 是否启用内置 Web 控制台和管理接口 |
 | `GATEWAY_CREDENTIAL_MODE` | `managed` | `managed` 允许网页登录/切号/登出；`external` 禁用网页认证写操作 |
 | `GATEWAY_AUTH_KEEPALIVE_INTERVAL` | `30m` | 已登录状态下的空闲静默保活间隔，`0` 表示关闭 |
+| `GATEWAY_USAGE_FILE` | 空 | 可选用量文件路径。容器可设为 `/data/gateway-usage.json` |
 | `GATEWAY_STATUS_OBSERVER` | `frida`（amd64 镜像） | 上游状态码观测模式：`frida` / `store` / `off` |
 | `AGY_DATA_VOLUME` | `<项目名>_agy-data` | 指定复用的 Docker 数据卷名称 |
 | `AGY_EXPECTED_VERSION` / `AGY_EXPECTED_SHA256` | 空 | 可选构建参数，用于构建 AIO 镜像时校验 `agy` 版本与 ELF SHA-256 |
@@ -200,6 +209,9 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
 | `-agy` | 空（内置 mock） | 真实 `agy` 可执行文件路径 |
 | `-live` | `false` | 启用真实上游服务（需配合 `-agy`） |
 | `-api-key` | 读取 `GATEWAY_API_KEY` | Bearer 鉴权密钥 |
+| `-cache-stateless-responses` | `false` | 允许完整的 `store: false` 历史匹配内存中的 ACP 会话 |
+| `-metrics` | `false` | 启用带 API Key 鉴权的 Prometheus 指标 |
+| `-usage-file` | 读取 `GATEWAY_USAGE_FILE` | 保存累计、当日 UTC 及按模型的请求和 Token 计数 |
 | `-model-map` | `{}` | 模型别名映射，例如 `'{"gpt-4o":"实际模型ID"}'` |
 | `-agent` | `gateway-clean` | 指定 ACP Agent；传 `default` 可恢复 `agy` 原生代理 |
 | `-soft-block-residual-tools` | `true` | 软屏蔽 `agy` 无法从底层移除的残留内置工具名 |
@@ -210,6 +222,45 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
 | `-turn-timeout` | `15m` | 单回合最大超时时间 |
 | `-body-limit` | `32 MiB` | HTTP 请求体大小上限 |
 | `-cors-origins` | 空 | 允许的 CORS Origin（逗号分隔） |
+
+---
+
+## 用量与反向代理
+
+Dashboard 显示网关实测用量、会话调度、最近 20 条脱敏错误，以及 ACP 返回的套餐和模型信息。模型冷却倒计时使用已观测的上游 `429` 与经验证的重试提示。
+
+开启用量文件后，网关每分钟及正常退出时写入数字计数，并在下次启动恢复。单个运行实例使用独立的用量文件。可在 Dashboard 重置累计、当日和按模型的用量。最近异常、冷却和会话诊断保存在内存中。
+
+使用 Nginx 终止 HTTPS 时，在服务配置里填写自己的证书路径和网关地址。为 Responses、Chat Completions 和工具等待保留足够的连接时间。
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name gateway.example.com;
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 16m;
+    }
+}
+```
+
+Caddy 使用同一个网关地址，按响应逐块刷新 SSE。域名解析到 Caddy 后，由 Caddy 管理 HTTPS 证书。
+
+```caddy
+gateway.example.com {
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1
+    }
+}
+```
 
 ---
 

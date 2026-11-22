@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -29,7 +30,8 @@ type message struct {
 }
 type request struct {
 	responses, stream, includeUsage, hasTools, store, clientModel bool
-	model, system, effort, previous, key                          string
+	cache                                                         bool
+	model, system, effort, previous, key, user                    string
 	history                                                       []message
 	tools                                                         []tool
 }
@@ -295,11 +297,12 @@ func parseInput(b obj, h http.Header, responses bool) (q request, err error) {
 		}
 	}
 	if !responses {
-		for _, v := range []string{str(b["prompt_cache_key"]), h.Get("X-Session-Id"), h.Get("X-Conversation-Id"), str(b["user"])} {
-			if v != "" {
-				q.key = "explicit/" + v
-				break
-			}
+		q.user = str(b["user"])
+	}
+	for _, v := range []string{str(b["prompt_cache_key"]), h.Get("X-Session-Id"), h.Get("X-Conversation-Id")} {
+		if v != "" {
+			q.key = v
+			break
 		}
 	}
 	return q, nil
@@ -310,8 +313,21 @@ func prefix(history, old []message) bool {
 		return false
 	}
 	for i, m := range old {
-		if enc(m) != enc(history[i]) {
+		n := history[i]
+		if m.Role != n.Role || m.ID != n.ID || !reflect.DeepEqual(m.Blocks, n.Blocks) || len(m.Calls) != len(n.Calls) {
 			return false
+		}
+		for j, c := range m.Calls {
+			d := n.Calls[j]
+			if enc(c) == enc(d) {
+				continue
+			}
+			a, b := asObj(c["function"]), asObj(d["function"])
+			c1, e1 := normalizeCall(str(c["id"]), str(a["name"]), a["arguments"])
+			c2, e2 := normalizeCall(str(d["id"]), str(b["name"]), b["arguments"])
+			if e1 != nil || e2 != nil || enc(c1) != enc(c2) {
+				return false
+			}
 		}
 	}
 	return true

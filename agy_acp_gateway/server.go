@@ -33,13 +33,13 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	modelPost := r.Method == "POST" && (path == "/v1/chat/completions" || path == "/v1/responses")
-	successful := false
+	started := time.Now()
+	var l lease
+	var result obj
+	var failureResult *failure
 	if modelPost {
-		g.usage.total.Add(1)
 		defer func() {
-			if !successful {
-				g.usage.failed.Add(1)
-			}
+			g.recordRequest(started, path, rid, l.metricModel, failureResult, result, l)
 		}()
 	}
 	if (path == "/health" || path == "/ready") && r.Method == "GET" {
@@ -83,6 +83,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	httpErr := func(e error) {
 		f := publicFailure(e)
+		failureResult = f
 		slog.Info("request failed", "request_id", rid, "status", f.status, "code", f.code, "upstream", f.upstream)
 		writeFailure(w, f)
 	}
@@ -94,25 +95,16 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.admin(w, r)
 		return
 	}
-	if path == "/v1/models" {
-		if r.Method != "GET" {
-			w.Header().Set("Allow", "GET")
-			httpErr(problem(405, "method_not_allowed", "Method not allowed."))
-			return
-		}
-		models := g.modelsList()
-		if len(models) == 0 {
-			g.mu.Lock()
-			err := g.unavailableLocked()
-			g.mu.Unlock()
+	if path == "/metrics" && g.cfg.metrics {
+		if err := g.serveMetrics(w, r); err != nil {
 			httpErr(err)
-			return
 		}
-		data := []obj{}
-		for _, m := range models {
-			data = append(data, obj{"id": m, "object": "model", "owned_by": "agy"})
+		return
+	}
+	if path == "/v1/models" || strings.HasPrefix(path, "/v1/models/") {
+		if err := g.serveModels(w, r); err != nil {
+			httpErr(err)
 		}
-		writeJSON(w, 200, obj{"object": "list", "data": data})
 		return
 	}
 	if path != "/v1/chat/completions" && path != "/v1/responses" {
@@ -134,8 +126,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpErr(requestFailure(err, r.Context(), q, lease{}))
 		return
 	}
-	started := time.Now()
-	l, err := g.acquire(&q)
+	l, err = g.acquire(&q)
 	if err != nil {
 		httpErr(requestFailure(err, r.Context(), q, l))
 		return
@@ -153,7 +144,8 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	o := newOutput(w, q)
 	o.start()
-	result, calls, err := collect(ctx, l.t, o, g.cfg.batch)
+	var calls []*pending
+	result, calls, err = collect(ctx, l.t, o, g.cfg.batch)
 	if err == nil {
 		for _, c := range calls {
 			o.addCall(c)
@@ -169,13 +161,14 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.requireAuth(l.s.peer, f)
 		g.drop(l.s)
 		l.t.cancel()
+		failureResult = f
 		o.failed(f)
 		slog.Info("request failed", "request_id", rid, "endpoint", path, "status", f.status, "code", f.code, "upstream", f.upstream, "latency_ms", time.Since(started).Milliseconds())
 		return
 	}
 	o.finish(result)
-	successful = o.streamErr == nil && r.Context().Err() == nil
-	if !successful {
+	if o.streamErr != nil || r.Context().Err() != nil {
+		failureResult = publicFailure(context.Canceled)
 		slog.Info("request delivery interrupted", "request_id", rid, "endpoint", path)
 		return
 	}

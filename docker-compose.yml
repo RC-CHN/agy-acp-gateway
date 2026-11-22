@@ -30,6 +30,7 @@ services:
       GATEWAY_DASHBOARD: ${GATEWAY_DASHBOARD:-true}
       GATEWAY_CREDENTIAL_MODE: ${GATEWAY_CREDENTIAL_MODE:-managed}
       GATEWAY_STATUS_OBSERVER: ${GATEWAY_STATUS_OBSERVER:-frida}
+      GATEWAY_USAGE_FILE: ${GATEWAY_USAGE_FILE:-}
     volumes:
       - agy-data:/data
     ports:

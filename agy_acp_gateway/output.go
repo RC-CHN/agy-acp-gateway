@@ -188,7 +188,7 @@ func (o *output) history() []message {
 		return []message{o.assistant()}
 	}
 	o.closePart()
-	if !o.q.store {
+	if !o.q.store && !o.q.cache {
 		return nil
 	}
 	var history []message

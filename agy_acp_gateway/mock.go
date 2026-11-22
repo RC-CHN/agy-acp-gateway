@@ -71,7 +71,7 @@ func (m *mockACP) handle(p *peer, f frame) {
 		m.mu.Unlock()
 		switch f.Method {
 		case "initialize":
-			reply(obj{"protocolVersion": 1, "agentInfo": obj{"name": "offline mock"}})
+			reply(obj{"protocolVersion": 1, "agentInfo": obj{"name": "offline mock", "version": "1"}})
 		case "session/new":
 			s = &mockSession{}
 			servers := arr(f.Params["mcpServers"])
@@ -95,7 +95,7 @@ func (m *mockACP) handle(p *peer, f frame) {
 			m.mu.Lock()
 			m.sessions[id] = s
 			m.mu.Unlock()
-			reply(obj{"sessionId": id, "models": obj{"currentModelId": "mock", "availableModels": []obj{{"modelId": "mock"}, {"modelId": "mock-alt"}}}, "configOptions": []obj{{"id": "thought_level", "options": []obj{{"value": "low"}, {"value": "high"}}}}})
+			reply(obj{"sessionId": id, "models": obj{"currentModelId": "mock", "availableModels": []obj{{"modelId": "mock", "name": "Mock"}, {"modelId": "mock-alt", "name": "Mock Alternative"}}}, "configOptions": []obj{{"id": "thought_level", "options": []obj{{"value": "low"}, {"value": "high"}}}}})
 		case "session/close", "session/cancel":
 			m.mu.Lock()
 			if s != nil && s.cancel != nil {

@@ -169,7 +169,7 @@ func TestResponsesManualResultCannotConsumeStoredTurn(t *testing.T) {
 	postJSON(t, f.g, "responses", obj{"input": []any{result}}, 400)
 	postJSON(t, f.g, "responses", obj{"previous_response_id": first["id"], "input": "premature"}, 400)
 	for _, req := range []obj{
-		{"input": withOutput(h, first, result), "tools": specs("weather")},
+		{"input": withOutput(h, first, result), "tools": specs("weather"), "store": false},
 		{"input": []any{result}, "previous_response_id": first["id"], "store": false},
 	} {
 		r := postJSON(t, f.g, "responses", req, 200)

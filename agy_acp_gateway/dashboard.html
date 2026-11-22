@@ -223,6 +223,41 @@
           monospace;
         background: #edf3eb;
       }
+      .model-entry {
+        min-width: 0;
+        max-width: 100%;
+      }
+      .model-entry small {
+        display: block;
+        overflow-wrap: anywhere;
+        color: var(--muted);
+        margin: 4px 0 8px;
+      }
+      .model.cooldown {
+        background: #fff0db;
+        border-color: #c69345;
+      }
+      .table-wrap {
+        overflow-x: auto;
+        margin: 10px 0;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th, td {
+        border-bottom: 1px solid var(--edge);
+        padding: 7px 8px;
+        text-align: left;
+        white-space: nowrap;
+      }
+      details {
+        margin-top: 14px;
+      }
+      summary {
+        cursor: pointer;
+      }
       .model::after {
         content: " ⧉";
         color: var(--muted);
@@ -395,9 +430,28 @@
           <hr class="rule" />
           <div class="heading">
             <h2>请求与用量</h2>
-            <span class="foot">本次启动以来</span>
+            <span id="usagePeriod" class="foot"></span>
           </div>
           <dl id="usage" class="metrics three"></dl>
+          <details>
+            <summary>按模型查看累计用量</summary>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>模型 ID</th><th>请求</th><th>失败</th><th>输入</th><th>输出</th><th>缓存</th><th>推理</th></tr></thead>
+                <tbody id="modelUsage"></tbody>
+              </table>
+            </div>
+            <button id="resetUsage" type="button">重置统计</button>
+          </details>
+          <details>
+            <summary>最近异常</summary>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>接口</th><th>模型</th><th>HTTP</th><th>错误码</th><th>上游 HTTP</th><th>重试等待</th><th>请求 ID</th></tr></thead>
+                <tbody id="recentErrors"></tbody>
+              </table>
+            </div>
+          </details>
           <p class="meta">
             仅累计 ACP 已报告的 Token。缓存命中和推理分别计入输入和输出。
           </p>
@@ -593,10 +647,36 @@
           notice("无法访问剪贴板，请手动复制。");
         }
       }
+      function tableRows(id, rows, width) {
+        const body = $(id);
+        body.replaceChildren();
+        if (!rows.length) {
+          const td = body.insertRow().insertCell();
+          td.colSpan = width;
+          td.textContent = "暂无记录";
+        }
+        for (const values of rows) {
+          const row = body.insertRow();
+          for (const value of values) {
+            row.insertCell().textContent =
+              typeof value === "number" ? number.format(value) : (value ?? "—");
+          }
+        }
+      }
+      function updateCooldowns() {
+        for (const entry of $("models").children) {
+          if (!entry.dataset.until) continue;
+          const seconds = Math.max(0, Math.ceil((Date.parse(entry.dataset.until) - Date.now()) / 1000));
+          entry.querySelector("button").classList.toggle("cooldown", seconds > 0);
+          entry.querySelector(".cooldown-status").textContent = seconds
+            ? "冷却中 " + Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0")
+            : "";
+        }
+      }
       function render(s) {
         status = s;
         locked = false;
-        const { auth: a, acp: c, sessions: x, usage: u } = s;
+        const { auth: a, acp: c, sessions: x, usage: u, telemetry: t } = s;
         show("unlock", false);
         show("panel", true);
         show("lock", !!key);
@@ -624,6 +704,7 @@
             : "内置 Mock ACP"
           : a.email ||
             (auth ? "已登录" : needsLogin ? "未登录" : "正在检查已有登录");
+        if (a.tier) $("account").textContent += " · " + a.tier;
         $("accountNote").textContent = external
           ? "凭据由宿主机管理。"
           : mock
@@ -684,6 +765,15 @@
           ["会话 / 上限", x.active + " / " + x.max],
           ["挂起工具", x.pending_tool_calls],
           ["拦截权限", x.denied_permissions],
+          ["agy 版本", c.version || "—"],
+          ["状态码观测器", (c.observer || "acp-only") +
+            (c.last_observation_source ? " · 最近来源 " + c.last_observation_source : "")],
+          ["增量复用", t.session_reused],
+          ["工具续接", t.tool_resumed],
+          ["新建或重放", t.session_rebuilt],
+          ["客户端断开", t.client_cancelled],
+          ["工具等待超时", t.tool_timeouts],
+          ["回合超时", t.turn_timeouts],
         ]);
         metrics("usage", [
           ["总请求", u.requests_total],
@@ -691,18 +781,42 @@
           ["输入 Token", u.input_tokens],
           ["输出 Token", u.output_tokens],
           ["缓存命中", u.cached_tokens],
+          ["缓存命中率", u.input_tokens ? (100 * u.cached_tokens / u.input_tokens).toFixed(1) + "%" : "—"],
           ["推理 Token", u.reasoning_tokens],
+          ["今日请求（UTC）", t.today.requests_total],
+          ["今日输入（UTC）", t.today.input_tokens],
+          ["今日输出（UTC）", t.today.output_tokens],
         ]);
+        $("usagePeriod").textContent = s.persistent_usage ? "从上次重置累计" : "本次启动以来";
+        tableRows("modelUsage", Object.entries(t.by_model).sort(([a], [b]) => a.localeCompare(b))
+          .map(([id, m]) => [id, m.requests_total, m.requests_errors, m.input_tokens, m.output_tokens, m.cached_tokens, m.reasoning_tokens]), 7);
+        tableRows("recentErrors", t.recent_errors.map(e => [
+          new Date(e.at).toLocaleTimeString("zh-CN"), e.endpoint, e.model, String(e.status), e.code,
+          e.provider_http_status?.toString(), e.retry_after_s === undefined ? undefined : e.retry_after_s + " 秒", e.request_id
+        ]), 8);
         $("modelCount").textContent = c.models.length + " 个模型";
         $("models").replaceChildren();
         if (!c.models.length) $("models").textContent = "模型目录尚未就绪。";
-        for (const id of c.models) {
-          const b = document.createElement("button");
+        for (const m of c.model_details) {
+          const entry = document.createElement("div"),
+            b = document.createElement("button"),
+            detail = document.createElement("small"),
+            cooling = document.createElement("small");
+          entry.className = "model-entry";
           b.className = "model";
-          b.textContent = id;
-          b.onclick = () => copyText(id, id, b);
-          $("models").append(b);
+          b.textContent = m.id;
+          b.onclick = () => copyText(m.id, m.id, b);
+          detail.textContent = [m.name === m.id ? "" : m.name, m.reasoning_efforts?.join(" / ")].filter(Boolean).join(" · ");
+          cooling.className = "cooldown-status";
+          const limit = t.cooldowns[m.canonical_id || m.id];
+          if (limit?.cooldown_until) entry.dataset.until = limit.cooldown_until;
+          if (limit?.last_429_at) cooling.title = "最近一次上游限流 " + new Date(limit.last_429_at).toLocaleString("zh-CN");
+          entry.append(b);
+          if (detail.textContent) entry.append(detail);
+          if (entry.dataset.until) entry.append(cooling);
+          $("models").append(entry);
         }
+        updateCooldowns();
         sample();
       }
       async function refresh(manual = false, quietAuth = false) {
@@ -811,6 +925,23 @@
           sample();
         }
       };
+      $("resetUsage").onclick = async () => {
+        if (busy || !confirm("清空累计和今日用量统计？")) return;
+        busy = true;
+        revision++;
+        $("resetUsage").disabled = true;
+        try {
+          await api("usage/reset", {});
+          await refresh();
+          toast("用量统计已重置");
+        } catch (e) {
+          failed(e);
+        } finally {
+          $("resetUsage").disabled = false;
+          busy = false;
+        }
+      };
+      setInterval(updateCooldowns, 1000);
       $("copy").onclick = () => copyText($("sample").textContent, "接入示例", $("copy"));
       refresh(false, true);
       setInterval(() => {

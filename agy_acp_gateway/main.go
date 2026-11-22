@@ -62,6 +62,9 @@ func run(ctx context.Context) error {
 	flag.DurationVar(&c.authKeepalive, "auth-keepalive-interval", c.authKeepalive, "idle interval for silent managed agy credential checks (0 disables)")
 	flag.BoolVar(&c.dashboard, "dashboard", c.dashboard, "serve the embedded administration dashboard")
 	flag.StringVar(&c.credentialMode, "credential-mode", c.credentialMode, "credential management: managed or external")
+	flag.BoolVar(&c.cacheStateless, "cache-stateless-responses", false, "allow internal ACP transcript reuse for store:false Responses")
+	flag.BoolVar(&c.metrics, "metrics", false, "serve Prometheus metrics with the gateway API key")
+	flag.StringVar(&c.usageFile, "usage-file", os.Getenv("GATEWAY_USAGE_FILE"), "persist numeric usage counters in this JSON file")
 	flag.Parse()
 	if c.authKeepalive < 0 {
 		return errors.New("auth-keepalive-interval must be nonnegative")
@@ -149,6 +152,9 @@ func run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	g := newGateway(ctx, c)
+	if err := g.loadUsage(); err != nil {
+		return fmt.Errorf("load usage: %w", err)
+	}
 	internal := &http.Server{Handler: http.HandlerFunc(g.mcp), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	api := &http.Server{Handler: g, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 	workerDone := make(chan struct{})
@@ -159,6 +165,8 @@ func run(ctx context.Context) error {
 	slog.Info("listening", "address", public.Addr().String(), "mock_acp", bin == "")
 	ticker := time.NewTicker(min(time.Minute, c.idle))
 	defer ticker.Stop()
+	persist := time.NewTicker(time.Minute)
+	defer persist.Stop()
 loop:
 	for {
 		select {
@@ -168,6 +176,10 @@ loop:
 			break loop
 		case <-ticker.C:
 			g.reap()
+		case <-persist.C:
+			if saveErr := g.saveUsage(); saveErr != nil {
+				slog.Warn("could not save usage", "error", saveErr)
+			}
 		}
 	}
 	cancel()
@@ -179,6 +191,9 @@ loop:
 	_ = api.Close()
 	_ = internal.Close()
 	<-workerDone
+	if saveErr := g.saveUsage(); saveErr != nil {
+		return fmt.Errorf("save usage: %w", saveErr)
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

@@ -37,6 +37,22 @@ async function main() {
     await el('key').fill('dashboard-fixture');
     await el('unlock').locator('button').click();
     await waitText('badge', 'Mock 模式');
+    await waitText('models', 'low / high');
+    await page.evaluate(async () => {
+      const result = await fetch('/v1/responses', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer dashboard-fixture', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: 'usage check' }),
+      });
+      if (!result.ok) throw new Error('mock generation failed');
+      await result.json();
+    });
+    await el('refresh').click();
+    await page.getByText('按模型查看累计用量').click();
+    await waitText('modelUsage', 'mock');
+    page.once('dialog', dialog => dialog.accept());
+    await el('resetUsage').click();
+    await waitText('modelUsage', '暂无记录');
     assert.equal(await columns(), 3);
     await page.getByRole('button', { name: 'Python', exact: true }).click();
     await el('copy').click();
@@ -53,7 +69,8 @@ async function main() {
       headers: { Authorization: 'Bearer ' + key },
     })).json(), 'dashboard-fixture');
     status.mode = 'live';
-    Object.assign(status.auth, { status: 'unauthenticated', email: '', auth_required: true });
+    Object.assign(status.auth, { status: 'unauthenticated', email: '', auth_required: true, tier: 'Fixture Pro' });
+    status.telemetry.cooldowns.mock = { cooldown_until: new Date(Date.now() + 60000).toISOString() };
     status.acp.alive = false;
     await page.route('**/admin/api/**', async route => {
       const path = new URL(route.request().url()).pathname;
@@ -73,6 +90,7 @@ async function main() {
       await route.fulfill({ json: result });
     });
     await el('refresh').click();
+    await waitText('models', '冷却中');
     await el('start').click();
     await waitText('countdown', '剩余有效时间');
     assert.match(await el('authlink').getAttribute('href'), /^https:\/\/accounts\.google\.com\//);
@@ -85,6 +103,7 @@ async function main() {
     await el('code').fill('fixture-code');
     await el('complete').click();
     await waitText('account', 'test@example.invalid');
+    await waitText('account', 'Fixture Pro');
     await waitText('feedback', '登录成功');
     assert.equal(await el('code').inputValue(), '');
     await el('lock').click();

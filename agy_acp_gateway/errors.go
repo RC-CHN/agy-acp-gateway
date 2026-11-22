@@ -31,6 +31,7 @@ var (
 	workerUnavailable   = problem(503, "worker_unavailable", "The ACP worker is not ready.")
 	protocolFailure     = problem(502, "acp_protocol_error", "The ACP worker returned an invalid response.")
 	turnCancelled       = problem(502, "acp_request_cancelled", "The ACP worker cancelled the request.")
+	toolWaitTimeout     = problem(504, "tool_wait_timeout", "Timed out waiting for client tool results.")
 	turnTimeout         = problem(504, "upstream_timeout", "The ACP turn timed out.")
 	internalFailure     = problem(500, "internal_error", "The gateway could not complete the request.")
 	previousUnavailable = parameter("previous_response_unavailable", "previous_response_id", "This response can no longer be continued by ID. Supply the full input history.")
@@ -184,6 +185,8 @@ func requestFailure(err error, ctx context.Context, q request, l lease) *failure
 			mapped := *turnTimeout
 			mapped.upstream = f.upstream
 			return &mapped
+		case cause == toolWaitTimeout:
+			return toolWaitTimeout
 		case cause == protocolFailure:
 			return protocolFailure
 		case ctx.Err() == context.Canceled:

@@ -68,6 +68,7 @@ func withStatusObserver(cmd command, python, backend string) (command, error) {
 	cmd.args = append(args, cmd.args...)
 	cmd.bin = path
 	cmd.observeStatus = true
+	cmd.observerMode = backend
 	return cmd, nil
 }
 

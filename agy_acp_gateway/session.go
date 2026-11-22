@@ -23,7 +23,9 @@ type config struct {
 	idle, toolTimeout, turnTimeout, batch       time.Duration
 	bodyLimit                                   int64
 	models                                      map[string]string
-	softBlockResidualTools                      bool
+	softBlockResidualTools, cacheStateless      bool
+	metrics                                     bool
+	usageFile                                   string
 }
 
 func defaults() config {
@@ -57,27 +59,32 @@ func effectiveSystemPrompt(clientSystem string, hasTools, softBlock bool) string
 }
 
 type gateway struct {
-	auth                   *authManager
-	usage                  counters
-	wake                   chan struct{}
-	paused                 bool
-	runCancel              context.CancelFunc
-	runDone                chan struct{}
-	defaultModel           string
-	denied                 atomic.Uint64
-	cfg                    config
-	ctx                    context.Context
-	mu                     sync.Mutex
-	worker                 *peer
-	authError              *failure
-	hadLogin, retryingAuth bool
-	lastModelUse           time.Time
-	lastAuthCheck          time.Time
-	authCheckError         string
-	catalog                []string
-	sessions               map[string]*session // MCP capability token -> session
-	keys, tips, ids        map[string]*session
-	started                time.Time
+	auth                          *authManager
+	usage                         counters
+	telemetry                     telemetry
+	wake                          chan struct{}
+	paused                        bool
+	runCancel                     context.CancelFunc
+	runDone                       chan struct{}
+	defaultModel                  string
+	version, tier                 string
+	observerMode, lastObservation string
+	modelDetails                  map[string]modelInfo
+	denied                        atomic.Uint64
+	cfg                           config
+	ctx                           context.Context
+	mu                            sync.Mutex
+	worker                        *peer
+	authError                     *failure
+	hadLogin, retryingAuth        bool
+	lastModelUse                  time.Time
+	lastAuthCheck                 time.Time
+	authCheckError                string
+	catalog                       []string
+	sessions                      map[string]*session // MCP capability token -> session
+	keys                          map[string]map[*session]struct{}
+	tips, ids                     map[string]*session
+	started                       time.Time
 }
 type session struct {
 	key, token, mcpID, id, tip, model, system, effort string
@@ -100,16 +107,19 @@ type pending struct {
 	reply          chan []obj
 }
 type turn struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	abort     context.CancelCauseFunc
-	events    chan event
-	published map[string]*pending
+	timeoutCounted atomic.Bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	abort          context.CancelCauseFunc
+	events         chan event
+	published      map[string]*pending
 }
 
 func newGateway(ctx context.Context, c config) *gateway {
-	g := &gateway{wake: make(chan struct{}, 1), ctx: ctx, cfg: c, sessions: map[string]*session{}, keys: map[string]*session{}, tips: map[string]*session{}, ids: map[string]*session{}, started: time.Now()}
+	g := &gateway{wake: make(chan struct{}, 1), ctx: ctx, cfg: c, sessions: map[string]*session{}, keys: map[string]map[*session]struct{}{}, tips: map[string]*session{}, ids: map[string]*session{}, started: time.Now()}
 	g.auth = newAuthManager(g)
+	g.telemetry.history = usageHistory{Version: 1, Models: map[string]usageTotals{}}
+	g.telemetry.cooldowns = map[string]cooldown{}
 	return g
 }
 func (g *gateway) activeLocked() int {
@@ -123,7 +133,8 @@ func (g *gateway) activeLocked() int {
 }
 func (g *gateway) forgetLocked(s *session) {
 	delete(g.sessions, s.token)
-	if g.keys[s.key] == s {
+	delete(g.keys[s.key], s)
+	if len(g.keys[s.key]) == 0 {
 		delete(g.keys, s.key)
 	}
 	delete(g.tips, s.tip)
@@ -176,6 +187,7 @@ func (g *gateway) incoming(p *peer, f frame) {
 		if kind == "config_option_update" {
 			if options := arr(u["configOptions"]); options != nil {
 				s.options = options
+				g.updateThoughtLevelsLocked(s.model, options)
 			}
 		}
 		if kind == "agent_thought_chunk" || kind == "agent_message_chunk" {
@@ -263,8 +275,9 @@ func (g *gateway) setup(ctx context.Context, s *session, clientModel bool) error
 	s.id = id
 	g.ids[id] = s
 	s.options = arr(v["configOptions"])
-	g.mu.Unlock()
 	models := asObj(v["models"])
+	g.updateThoughtLevelsLocked(str(models["currentModelId"]), s.options)
+	g.mu.Unlock()
 	if s.model != "" && str(models["currentModelId"]) != s.model {
 		var available []string
 		for _, x := range arr(models["availableModels"]) {
@@ -283,6 +296,9 @@ func (g *gateway) setup(ctx context.Context, s *session, clientModel bool) error
 		if options := arr(result["configOptions"]); options != nil {
 			g.mu.Lock()
 			s.options = options
+			if g.worker == s.peer {
+				g.updateThoughtLevelsLocked(s.model, options)
+			}
 			g.mu.Unlock()
 		}
 	}
@@ -338,8 +354,62 @@ func toolSuffix(history []message) ([]message, []message) {
 type lease struct {
 	s             *session
 	t             *turn
+	metricModel   string
 	fresh, resume bool
 	input         []message
+}
+
+func transcriptKey(q request) string {
+	scope := "chat/"
+	if q.responses {
+		scope = "responses/"
+		if q.cache {
+			scope = "stateless/"
+		}
+	}
+	if q.key != "" {
+		return scope + "explicit/" + q.key
+	}
+	for _, m := range q.history {
+		if m.Role == "user" {
+			return scope + digest([]any{q.user, q.model, q.system, q.tools, m})
+		}
+	}
+	return ""
+}
+
+func matchesConfig(q request, s *session) bool {
+	return q.model == s.model && q.system == s.system && enc(q.tools) == enc(s.tools)
+}
+
+func (g *gateway) matchTranscript(q request) *session {
+	before, outputs := toolSuffix(q.history)
+	var best *session
+	for s := range g.keys[q.key] {
+		if !matchesConfig(q, s) {
+			continue
+		}
+		if s.busy && len(q.history) == len(s.history) && prefix(q.history, s.history) {
+			return s
+		}
+		if s.turn != nil {
+			if len(outputs) == 0 || len(s.turn.published) == 0 || len(before) != len(s.history) ||
+				(q.effort != "" && q.effort != s.effort) || !prefix(before, s.history) {
+				continue
+			}
+		} else {
+			if len(q.history) <= len(s.history) || !prefix(q.history, s.history) {
+				continue
+			}
+			if slices.ContainsFunc(q.history[len(s.history):], func(m message) bool { return m.Role != "user" }) {
+				continue
+			}
+		}
+		if best == nil || len(s.history) > len(best.history) || (len(s.history) == len(best.history) && s.last.After(best.last)) {
+			best = s
+		}
+	}
+	return best
 }
 
 func (g *gateway) acquire(q *request) (lease, error) {
@@ -352,50 +422,50 @@ func (g *gateway) acquire(q *request) (lease, error) {
 	if mapped, ok := g.cfg.models[q.model]; ok {
 		q.model = mapped
 	}
-	if !q.responses && q.key == "" {
-		var first message
-		for _, m := range q.history {
-			if m.Role == "user" {
-				first = m
-				break
-			}
+	var parent, s *session
+	byID := q.responses && q.previous != ""
+	q.cache = q.responses && !q.store && g.cfg.cacheStateless && !byID
+	if byID {
+		s = g.tips[q.previous]
+		if s == nil {
+			return l, previousUnavailable
 		}
-		model := q.model
-		if model == "" {
-			model = g.defaultModel
+		if q.model == "" {
+			q.model = s.model
 		}
-		q.key = "chat/" + digest([]any{model, q.system, q.tools, first})
-	}
-	var parent *session
-	s := g.keys[q.key]
-	if q.responses {
-		if q.previous != "" {
-			s = g.tips[q.previous]
-			if s == nil {
-				return l, previousUnavailable
-			}
-			if q.model == "" {
-				q.model = s.model
-			}
-			if !q.hasTools {
-				q.tools = s.tools
-			}
-		} else {
-			s = nil
-			q.key = uid("resp-session-")
+		if !q.hasTools {
+			q.tools = s.tools
 		}
 	}
-
 	if q.model == "" && len(g.catalog) > 0 {
 		q.model = g.defaultModel
 		if q.model == "" {
 			q.model = g.catalog[0]
 		}
 	}
+	metricModel := ""
+	if slices.Contains(g.catalog, q.model) {
+		metricModel = q.model
+	}
+	if !byID && (!q.responses || q.store || q.cache) {
+		q.key = transcriptKey(*q)
+		s = g.matchTranscript(*q)
+		if s == nil && !q.responses && strings.HasPrefix(q.key, "chat/explicit/") && len(g.keys[q.key]) == 1 {
+			// Starting over on an explicitly named chat can abandon its sole
+			// published tool turn. Other transcript branches remain reusable.
+			for held := range g.keys[q.key] {
+				if !held.busy && held.turn != nil {
+					g.removeLocked(held)
+				}
+			}
+		}
+	} else {
+		q.key = ""
+	}
 	if s != nil && s.busy {
 		return l, problem(429, "session_busy", "Wait for the current turn to finish.")
 	}
-	if q.responses && s != nil {
+	if byID {
 		// Validate against the committed parent before resuming or rebuilding.
 		full := slices.Concat(s.history, q.history)
 		if err := validateReplay(full); err != nil {
@@ -406,24 +476,24 @@ func (g *gateway) acquire(q *request) (lease, error) {
 			// available for a later continuation under the normal TTL/LRU policy.
 			parent = s
 			q.history = full
-			q.key = uid("resp-session-")
+			q.key = ""
 			s = nil
 		} else {
 			q.key = s.key
 		}
 	}
 	before, outputs := toolSuffix(q.history)
-	compatible := s != nil && q.model == s.model && q.system == s.system && enc(q.tools) == enc(s.tools)
-	chatLiveResume := !q.responses && s != nil && s.turn != nil && len(s.turn.published) > 0 && compatible && len(before) == len(s.history) && prefix(before, s.history)
-	if len(outputs) > 0 && (chatLiveResume || (q.responses && s != nil && len(before) == 0)) {
+	compatible := s != nil && matchesConfig(*q, s)
+	fullResume := !byID && s != nil && s.turn != nil
+	if len(outputs) > 0 && (fullResume || (byID && s != nil && len(before) == 0)) {
 		if s == nil || s.turn == nil || len(s.turn.published) == 0 {
 			return l, toolHistory("no pending tool calls")
 		}
-		if q.responses && q.system == "" {
+		if byID && q.system == "" {
 			q.system = s.system
 			compatible = q.model == s.model && enc(q.tools) == enc(s.tools)
 		}
-		if !compatible || (!q.responses && (len(before) != len(s.history) || !prefix(before, s.history))) || (q.responses && q.effort != "" && q.effort != s.effort) {
+		if !compatible || (q.effort != "" && q.effort != s.effort) {
 			return l, toolHistory("tool results do not match the pending turn")
 		}
 		seen := map[string]bool{}
@@ -439,10 +509,10 @@ func (g *gateway) acquire(q *request) (lease, error) {
 		select {
 		case <-s.turn.ctx.Done():
 			g.removeLocked(s)
-			if q.responses {
+			if byID {
 				return l, previousUnavailable
 			}
-			// Chat Completions carries the full transcript, so fall through to replay in a fresh session.
+			// A complete transcript can rebuild after a pending tool times out.
 			s = nil
 		default:
 			s.busy = true
@@ -452,7 +522,7 @@ func (g *gateway) acquire(q *request) (lease, error) {
 			}
 			s.turn.published = nil
 			g.lastModelUse = time.Now()
-			return lease{s: s, t: s.turn, resume: true}, nil
+			return lease{s: s, t: s.turn, resume: true, metricModel: metricModel}, nil
 		}
 	}
 	if !q.responses {
@@ -462,7 +532,7 @@ func (g *gateway) acquire(q *request) (lease, error) {
 	}
 	input := q.history
 	if s != nil {
-		if q.responses {
+		if byID {
 			q.history = append(slices.Clone(s.history), q.history...)
 		}
 		if compatible && s.turn == nil && prefix(q.history, s.history) && len(q.history) > len(s.history) {
@@ -503,7 +573,12 @@ func (g *gateway) acquire(q *request) (lease, error) {
 		}
 		s = &session{key: q.key, token: uid(""), mcpID: uid(""), peer: g.worker, model: q.model, system: q.system, tools: q.tools}
 		g.sessions[s.token] = s
-		g.keys[s.key] = s
+		if s.key != "" {
+			if g.keys[s.key] == nil {
+				g.keys[s.key] = map[*session]struct{}{}
+			}
+			g.keys[s.key][s] = struct{}{}
+		}
 		l.fresh = true
 	}
 	s.busy = true
@@ -514,6 +589,7 @@ func (g *gateway) acquire(q *request) (lease, error) {
 	l.s = s
 	l.t = s.turn
 	l.input = input
+	l.metricModel = metricModel
 	g.lastModelUse = time.Now()
 	return l, nil
 }
@@ -526,6 +602,16 @@ func (g *gateway) dropTurn(s *session, t *turn, reason error) {
 			// The pending prompt RPC will deliver the terminal worker error.
 			return
 		default:
+		}
+		if reason == toolWaitTimeout {
+			g.telemetry.mu.Lock()
+			g.telemetry.toolTimeout++
+			g.telemetry.mu.Unlock()
+		}
+		if t.ctx.Err() == context.DeadlineExceeded && !t.timeoutCounted.Swap(true) {
+			g.telemetry.mu.Lock()
+			g.telemetry.turnTimeout++
+			g.telemetry.mu.Unlock()
 		}
 		t.abort(reason)
 		g.removeLocked(s)
@@ -554,13 +640,19 @@ func (g *gateway) begin(ctx context.Context, l lease, q request) error {
 		}
 		v, err := l.s.peer.call(l.t.ctx, "session/prompt", obj{"sessionId": l.s.id, "prompt": blocks})
 		if err == nil {
-			g.usage.record(asObj(v["usage"]))
 			switch str(v["stopReason"]) {
 			case "cancelled":
 				err = turnCancelled
 			case "end_turn", "max_tokens", "max_turn_requests", "refusal":
 				if l.s.peer.observeStatus {
 					err = observedError(v)
+					if source := str(v["gateway_observed_source"]); source == "frida" || source == "trajectory_store" {
+						g.mu.Lock()
+						if g.worker == l.s.peer {
+							g.lastObservation = source
+						}
+						g.mu.Unlock()
+					}
 				}
 			default:
 				err = protocolFailure
@@ -583,7 +675,7 @@ func (g *gateway) finish(l lease, q request, id string, output []message, calls 
 	if err := l.t.ctx.Err(); err != nil {
 		return err
 	}
-	if q.responses && !q.store {
+	if q.responses && !q.store && !q.cache {
 		if len(calls) == 0 {
 			l.t.cancel()
 			s.turn = nil
@@ -592,7 +684,7 @@ func (g *gateway) finish(l lease, q request, id string, output []message, calls 
 		return nil
 	}
 	s.history = append(s.history, output...)
-	if q.responses {
+	if q.responses && q.store {
 		delete(g.tips, s.tip)
 		s.tip = id
 		g.tips[id] = s

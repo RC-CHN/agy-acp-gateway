@@ -2,35 +2,16 @@ package main
 
 import (
 	_ "embed"
-	"math"
 	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
 //go:embed dashboard.html
 var dashboardHTML []byte
-
-type counters struct{ total, failed, input, output, cached, reasoning atomic.Uint64 }
-
-func (c *counters) record(u obj) {
-	add := func(dst *atomic.Uint64, field string) {
-		if n, ok := u[field].(float64); ok && n > 0 && n <= 1<<53 && n == math.Trunc(n) {
-			dst.Add(uint64(n))
-		}
-	}
-	add(&c.input, "inputTokens")
-	add(&c.output, "outputTokens")
-	add(&c.cached, "cachedReadTokens")
-	add(&c.reasoning, "thoughtTokens")
-}
-func (c *counters) snapshot() obj {
-	return obj{"requests_errors": c.failed.Load(), "requests_total": c.total.Load(), "input_tokens": c.input.Load(), "output_tokens": c.output.Load(), "cached_tokens": c.cached.Load(), "reasoning_tokens": c.reasoning.Load()}
-}
 
 func (g *gateway) adminStatus() obj {
 	a := g.auth
@@ -41,6 +22,10 @@ func (g *gateway) adminStatus() obj {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	alive := g.worker != nil && g.authError == nil
+	version, tier, observer, lastObservation := "", "", "acp-only", ""
+	if alive {
+		version, tier, observer, lastObservation = g.version, g.tier, g.observerMode, g.lastObservation
+	}
 	status := "connecting"
 	switch {
 	case g.cfg.mode != "live" && g.cfg.loginCommand == nil:
@@ -70,12 +55,13 @@ func (g *gateway) adminStatus() obj {
 		"ok": true, "mode": g.cfg.mode, "agent": g.cfg.agent, "soft_block_residual_tools": g.cfg.softBlockResidualTools,
 		"auth": obj{
 			"status": status, "auth_required": status == "unauthenticated", "saved_login": g.hadLogin || accountErr == nil,
-			"credential_mode": g.cfg.credentialMode, "email": account.Email, "login_in_progress": pendingLogin,
+			"credential_mode": g.cfg.credentialMode, "email": account.Email, "tier": tier, "login_in_progress": pendingLogin,
 			"keepalive_enabled": g.authKeepaliveEnabled(), "last_silent_check_at": lastCheck, "last_silent_check_error": g.authCheckError,
 		},
-		"acp":      obj{"alive": alive, "uptime_s": int(time.Since(g.started).Seconds()), "models": g.modelsLocked(), "default_model": g.defaultModel},
+		"acp": obj{"alive": alive, "uptime_s": int(time.Since(g.started).Seconds()), "models": g.modelsLocked(), "default_model": g.defaultModel,
+			"model_details": g.modelDirectoryLocked(), "version": version, "observer": observer, "last_observation_source": lastObservation},
 		"sessions": obj{"active": len(g.sessions), "max": g.cfg.maxSessions, "pending_tool_calls": pending, "denied_permissions": g.denied.Load()},
-		"usage":    g.usage.snapshot(),
+		"usage":    g.usage.snapshot(), "telemetry": g.telemetry.dashboard(), "persistent_usage": g.cfg.usageFile != "",
 	}
 }
 
@@ -107,7 +93,7 @@ func (g *gateway) admin(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "status":
 		method = "GET"
-	case "auth/start", "auth/cancel", "auth/complete", "auth/logout":
+	case "auth/start", "auth/cancel", "auth/complete", "auth/logout", "usage/reset":
 	default:
 		writeFailure(w, problem(404, "not_found", "Endpoint not found."))
 		return
@@ -121,7 +107,7 @@ func (g *gateway) admin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, g.adminStatus())
 		return
 	}
-	if err := g.auth.allowed(); err != nil {
+	if err := g.auth.allowed(); path != "usage/reset" && err != nil {
 		writeFailure(w, err)
 		return
 	}
@@ -145,6 +131,8 @@ func (g *gateway) admin(w http.ResponseWriter, r *http.Request) {
 	reply := obj{"ok": true}
 	var err error
 	switch path {
+	case "usage/reset":
+		err = g.resetUsage()
 	case "auth/start":
 		reply, err = g.auth.start(r.Context())
 	case "auth/complete":

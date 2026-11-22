@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -148,7 +147,7 @@ func (g *gateway) mcp(w http.ResponseWriter, r *http.Request) {
 			toolResult("Turn cancelled", true)
 			return
 		case <-timer.C:
-			g.dropTurn(s, t, context.DeadlineExceeded)
+			g.dropTurn(s, t, toolWaitTimeout)
 			toolResult("Timed out publishing tool call", true)
 			return
 		case <-r.Context().Done():
@@ -160,7 +159,7 @@ func (g *gateway) mcp(w http.ResponseWriter, r *http.Request) {
 			reply(obj{"content": v, "isError": false})
 		case <-timer.C:
 			toolResult("Tool call timed out waiting for client", true)
-			g.dropTurn(s, t, context.DeadlineExceeded)
+			g.dropTurn(s, t, toolWaitTimeout)
 		case <-r.Context().Done():
 			g.dropTurn(s, t, turnCancelled)
 		case <-t.ctx.Done():
