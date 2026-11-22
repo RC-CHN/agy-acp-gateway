@@ -117,6 +117,7 @@ FIELD = "gateway_observed_http_status"
 STATE = "gateway_observed_provider_status"
 RETRY = "gateway_observed_retry_after_s"
 SOURCE = "gateway_observed_source"
+LOST = "gateway_observed_worker_lost"
 
 
 def unique_keys(pairs):
@@ -265,33 +266,82 @@ def main():
     turns = {}
     lock = threading.Lock()
 
-    def attach_workers():
-        for pid in list(workers):
-            if workers[pid][0].is_detached:
-                del workers[pid]
+    @contextlib.contextmanager
+    def observer_deadline():
+        cancel = frida.Cancellable()
+        timer = threading.Timer(1.0, cancel.cancel)
+        timer.start()
+        try:
+            with cancel:
+                yield
+        finally:
+            timer.cancel()
+
+    def observer_for(sid):
+        if backend != "frida":
+            return None
+        if sid in workers:
+            return workers[sid]
+        database = str(conversation(sid))
         children = set()
         for entry in Path(f"/proc/{router.pid}/task").glob("*/children"):
             try:
                 children.update(map(int, entry.read_text().split()))
             except FileNotFoundError:
                 continue
-        for pid in children - workers.keys():
-            session = None
+        owners = []
+        for pid in children:
+            proc = Path(f"/proc/{pid}")
             try:
-                proc = Path(f"/proc/{pid}")
                 if not os.path.samestat(target, (proc / "exe").stat()):
                     continue
                 if (proc / "cmdline").read_bytes().split(b"\0")[1:3] != [b"acp", b"--worker"]:
                     continue
+                for fd in (proc / "fd").iterdir():
+                    try:
+                        if os.readlink(fd) == database:
+                            owners.append(pid)
+                            break
+                    except FileNotFoundError:
+                        continue
+            except OSError:
+                continue
+        if len(owners) != 1:
+            return None
+        pid = owners[0]
+        session = None
+        try:
+            with observer_deadline():
                 session = frida.attach(pid)
                 script = session.create_script(agent)
                 script.load()
-                script.exports_sync.ready()
-                workers[pid] = session, script
-            except Exception:
-                if session is not None and not session.is_detached:
+            workers[sid] = (pid, session, script)
+            return workers[sid]
+        except Exception:
+            if session is not None and not session.is_detached:
+                with contextlib.suppress(Exception), observer_deadline():
                     session.detach()
-                print("agy status observer could not attach to a session worker", file=sys.stderr)
+            return None
+
+    def snapshot_counts(observer):
+        if not observer or observer[1].is_detached:
+            return None
+        try:
+            with observer_deadline():
+                return observer[2].exports_sync.snapshot()
+        except Exception:
+            # Frida transport and agent RPC failures have no common base class.
+            return None
+
+    def worker_gone(observer):
+        if observer:
+            try:
+                os.stat(f"/proc/{observer[0]}/exe")
+            except FileNotFoundError:
+                return True
+            except OSError:
+                pass
+        return False
 
     def forward_requests():
         try:
@@ -304,10 +354,14 @@ def main():
                 if "id" in f and method in ("session/new", "session/prompt", "session/close"):
                     sid = f.get("params", {}).get("sessionId")
                     before = baseline(sid) if method == "session/prompt" and hasattr(sqlite3.Connection, "blobopen") else None
+                    if method == "session/close":
+                        workers.pop(sid, None)
+                    observer = observer_for(sid) if method == "session/prompt" else None
+                    counters = snapshot_counts(observer)
                     with lock:
-                        pending[f["id"]] = (method, sid, before)
+                        pending[f["id"]] = (method, sid, before, observer, counters)
                         if method == "session/prompt":
-                            turns[sid] = (None, 0)
+                            turns[sid] = (None, False)
                 router.stdin.write(line)
                 router.stdin.flush()
         except (BrokenPipeError, OSError, ValueError):
@@ -319,43 +373,18 @@ def main():
         sys.stdout.buffer.write(line)
         sys.stdout.buffer.flush()
 
-    def confirmed(sid, chunk, count, before):
+    def confirmed(sid, chunk, before, observer, counters):
         text = json.loads(chunk)["params"]["update"]["content"]["text"]
-        def from_store():
-            metadata = stored_status(sid, before, text)
-            if metadata:
-                metadata[SOURCE] = "trajectory_store"
-            return metadata
-
-        if backend == "store" or not workers:
-            return from_store()
-        size = len(text.encode("utf-8"))
-        matches = []
-        cancel = frida.Cancellable()
-        timer = threading.Timer(1.0, cancel.cancel)
-        timer.start()
-        try:
-            with cancel:
-                for session, script in workers.values():
-                    if session.is_detached:
-                        continue
-                    try:
-                        code = script.exports_sync.match(sid, count, size)
-                    except frida.OperationCancelledError:
-                        return from_store()
-                    except Exception:
-                        continue
-                    if type(code) is int and 400 <= code <= 599:
-                        matches.append(code)
-        finally:
-            timer.cancel()
-        if len(matches) != 1:
-            return from_store()
         metadata = stored_status(sid, before, text)
-        if metadata and metadata[FIELD] == matches[0]:
-            metadata[SOURCE] = "frida"
-            return metadata
-        return {FIELD: matches[0], SOURCE: "frida"}
+        if not metadata:
+            return None
+        metadata[SOURCE] = "trajectory_store"
+        after = snapshot_counts(observer) if counters else None
+        if after and len(counters) == len(after) == 800:
+            offset = (metadata[FIELD] - 400) * 4
+            if after[offset:offset+4] != counters[offset:offset+4]:
+                metadata[SOURCE] = "frida"
+        return metadata
 
     threading.Thread(target=forward_requests, daemon=True).start()
     try:
@@ -370,40 +399,42 @@ def main():
                 # Metadata can be forwarded immediately. Flush before tool activity.
                 with lock:
                     active = sid in turns
-                    held, count = turns.get(sid, (None, 0))
+                    held, emitted = turns.get(sid, (None, False))
                     text = (f["method"] == "session/update" and kind == "agent_message_chunk"
                             and isinstance(update.get("content", {}).get("text"), str))
                     candidate = text and update["content"]["text"].startswith("\n⚠ ")
                     visible = kind == "agent_message_chunk" or kind in ("agent_thought_chunk", "tool_call", "tool_call_update") or "id" in f
                     if active and visible:
-                        turns[sid] = (line if candidate else None, count + int(kind == "agent_message_chunk"))
+                        turns[sid] = (line if candidate else None, emitted or bool(held) or (not candidate and (text or kind in ("tool_call", "tool_call_update"))))
                 if active and visible and held:
                     emit(held)
                 if active and candidate:
                     continue
             else:
                 with lock:
-                    method, sid, before = pending.pop(f.get("id"), (None, None, None))
-                    held, count = turns.pop(sid, (None, 0)) if method == "session/prompt" else (None, 0)
+                    method, sid, before, observer, counters = pending.pop(f.get("id"), (None,) * 5)
+                    held, emitted = turns.pop(sid, (None, False)) if method == "session/prompt" else (None, False)
                     if method == "session/close":
                         turns.pop(sid, None)
                         for rpc_id, entry in list(pending.items()):
                             if entry[:2] == ("session/prompt", sid):
                                 del pending[rpc_id]
                 result = f.get("result")
-                if backend == "frida" and method == "session/new" and isinstance(result, dict) and result.get("sessionId"):
-                    attach_workers()
                 if method == "session/prompt" and isinstance(result, dict):
                     # Strip the private field before introducing a local observation.
-                    changed = any(key in result for key in (FIELD, STATE, RETRY, SOURCE))
-                    for key in (FIELD, STATE, RETRY, SOURCE):
+                    changed = any(key in result for key in (FIELD, STATE, RETRY, SOURCE, LOST))
+                    for key in (FIELD, STATE, RETRY, SOURCE, LOST):
                         result.pop(key, None)
                     if held and result.get("stopReason") == "end_turn":
-                        metadata = confirmed(sid, held, count, before)
+                        metadata = confirmed(sid, held, before, observer, counters)
                         if metadata:
                             result.update(metadata)
                             changed = True
                             held = None
+                    empty = not held and not emitted and not result.get("usage") and not result.get(FIELD)
+                    if empty and result.get("stopReason") == "end_turn" and worker_gone(observer):
+                        result[LOST] = True
+                        changed = True
                     if changed:
                         line = json.dumps(f, separators=(",", ":")).encode() + b"\n"
                 if held:

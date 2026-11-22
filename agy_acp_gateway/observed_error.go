@@ -72,6 +72,9 @@ func withStatusObserver(cmd command, python, backend string) (command, error) {
 }
 
 func observedError(result obj) error {
+	if result["gateway_observed_worker_lost"] == true {
+		return workerLost
+	}
 	value, ok := result["gateway_observed_http_status"].(float64)
 	if !ok || result["stopReason"] != "end_turn" || value < 400 || value > 599 || math.Trunc(value) != value {
 		return nil

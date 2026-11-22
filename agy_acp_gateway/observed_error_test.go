@@ -18,6 +18,9 @@ import (
 )
 
 func TestObservedStatusClassification(t *testing.T) {
+	if got := observedError(obj{"stopReason": "end_turn", "gateway_observed_worker_lost": true}); got != workerLost {
+		t.Fatalf("empty reply from a terminated worker: %v", got)
+	}
 	for source, want := range map[int]int{400: 502, 401: 503, 402: 502, 403: 403, 404: 502, 429: 429, 500: 502, 502: 502, 503: 503, 504: 504, 599: 502} {
 		err := observedError(obj{"stopReason": "end_turn", "gateway_observed_http_status": float64(source)})
 		if err == nil || statusOf(err) != want || asObj(errorBody(err)["upstream"])["provider_http_status"] != source {

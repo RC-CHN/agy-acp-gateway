@@ -163,7 +163,7 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
   - 无状态重放仅透传可见文本、推理摘要、工具调用与结果、图片，无法恢复上游隐藏推理签名或 KV 缓存。
 - **错误响应与上游状态码还原**：
   - 所有生成接口都会返回 `X-Request-Id` 与结构化 JSON 错误（SSE 开流后的错误以错误帧 / `response.failed` 结束）。
-  - Linux `amd64` 镜像默认内置状态码观测（`GATEWAY_STATUS_OBSERVER=frida`），可将 `agy` 吞掉的上游 `401` / `403` / `429` 等错误精确还原为标准 HTTP 状态码与 `Retry-After`；不需要时可设为 `store`（只读本地会话库）或 `off`。
+  - Linux `amd64` 镜像默认在 agy 1.5.14 的模型错误分类器读取 HTTP 状态码，并用当前会话的终态记录核实归属。错误响应的 `error.upstream.observation_source` 为 `frida` 或 `trajectory_store`，原始状态码在 `provider_http_status`；有可信的重试提示时才返回 `Retry-After`。可用 `GATEWAY_STATUS_OBSERVER=store` 单独读取会话库，或用 `off` 关闭观测。
 
 ---
 
