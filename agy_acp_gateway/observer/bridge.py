@@ -116,6 +116,7 @@ def http_status_line(blob, span, code):
 FIELD = "gateway_observed_http_status"
 STATE = "gateway_observed_provider_status"
 RETRY = "gateway_observed_retry_after_s"
+SOURCE = "gateway_observed_source"
 
 
 def unique_keys(pairs):
@@ -320,8 +321,14 @@ def main():
 
     def confirmed(sid, chunk, count, before):
         text = json.loads(chunk)["params"]["update"]["content"]["text"]
-        if backend == "store":
-            return stored_status(sid, before, text)
+        def from_store():
+            metadata = stored_status(sid, before, text)
+            if metadata:
+                metadata[SOURCE] = "trajectory_store"
+            return metadata
+
+        if backend == "store" or not workers:
+            return from_store()
         size = len(text.encode("utf-8"))
         matches = []
         cancel = frida.Cancellable()
@@ -335,7 +342,7 @@ def main():
                     try:
                         code = script.exports_sync.match(sid, count, size)
                     except frida.OperationCancelledError:
-                        return 0
+                        return from_store()
                     except Exception:
                         continue
                     if type(code) is int and 400 <= code <= 599:
@@ -343,11 +350,12 @@ def main():
         finally:
             timer.cancel()
         if len(matches) != 1:
-            return None
+            return from_store()
         metadata = stored_status(sid, before, text)
         if metadata and metadata[FIELD] == matches[0]:
+            metadata[SOURCE] = "frida"
             return metadata
-        return {FIELD: matches[0]}
+        return {FIELD: matches[0], SOURCE: "frida"}
 
     threading.Thread(target=forward_requests, daemon=True).start()
     try:
@@ -387,8 +395,8 @@ def main():
                     attach_workers()
                 if method == "session/prompt" and isinstance(result, dict):
                     # Strip the private field before introducing a local observation.
-                    changed = any(key in result for key in (FIELD, STATE, RETRY))
-                    for key in (FIELD, STATE, RETRY):
+                    changed = any(key in result for key in (FIELD, STATE, RETRY, SOURCE))
+                    for key in (FIELD, STATE, RETRY, SOURCE):
                         result.pop(key, None)
                     if held and result.get("stopReason") == "end_turn":
                         metadata = confirmed(sid, held, count, before)

@@ -145,6 +145,7 @@ docker compose build
 | `GATEWAY_CREDENTIAL_MODE` | 默认 `managed`，允许网页登录、切号和登出。`external` 适用于由宿主机维护的只读凭据，四个认证写接口返回 403 |
 | `GATEWAY_AUTH_KEEPALIVE_INTERVAL` | 已登录的 managed 实例默认每空闲 `30m` 检查一次。可填 `15m` 等 Go 时长，`0` 关闭后台检查。命令行参数为 `-auth-keepalive-interval` |
 | `AGY_DATA_VOLUME` | Compose 默认使用当前项目的 `<项目名>_agy-data` 命名卷。更改项目名或部署目录时，填原卷的实际名称即可继续使用其中的登录态 |
+| `GATEWAY_STATUS_OBSERVER` | Linux amd64 镜像默认 `frida`，也可选 `store` 或 `off`。裸二进制默认直接使用 ACP。观测范围与版本要求见下文 |
 | `GATEWAY_DASHBOARD` | 默认 `true`。`false` 关闭首页和管理路由。直接运行二进制可用 `-credential-mode`、`-dashboard` 覆盖相应环境变量 |
 | `AGY_EXPECTED_VERSION`、`AGY_EXPECTED_SHA256` | 可选构建参数。摘要为目标架构最终 ELF 的 SHA-256，版本或摘要不一致会令构建失败 |
 
@@ -187,17 +188,15 @@ Chat Completions 和 Responses 会在鉴权及解析之前生成 `X-Request-Id`�
 
 已提交 SSE 响应头时，HTTP 状态保持 200。Chat 在错误帧后发送一次 `[DONE]`。Responses 以 `response.failed` 结束，保留响应 ID、序号和已有输出，SDK 可以读取 `response.error`，扩展字段 `gateway_error.status` 与 `gateway_error.error` 给出逻辑 HTTP 状态和完整错误。原生 ACP 错误使用 `error.upstream.acp_code` 保留有符号数值，认证失败 `-32000` 对外为 503 / `acp_auth_required`。客户端仍连接时，agy 主动取消会产生 502 / `acp_request_cancelled`；网关自己超时为 504 / `upstream_timeout`。认证等待期间 `/health` 保持 200，`/ready` 返回 503，两者都有 `auth_required`。[分类实现](agy_acp_gateway/errors.go) · [接口验收](agy_acp_gateway/error_contract_test.go)
 
-### 可选的模型服务错误映射
+### 模型服务错误映射
 
-对 Linux amd64 的 `agy 1.5.14` 构建 `37873b80…d8c94`，启动参数 `-agy-status-python /absolute/path/to/python3` 可启用只读会话库观测。需要 Python 3.11+ 标准库的 sqlite3。每个回合在原生 ACP 结束时核对会话、错误步骤及模型生成记录，由 Go 网关生成公共错误。举例来说，模型权限拒绝返回 HTTP 403 和 `upstream_permission_denied`；上游 401 返回网关 503 和 `upstream_auth_failed`，两者都保留 `error.upstream.provider_http_status`。已校验的提供方枚举在 `error.upstream.provider_status`。终态 429、503 若携带可信的 `Retry-After` 或结构化 `google.rpc.RetryInfo`，错误体带整数 `error.retry_after_s`，还能写 HTTP 头时同步设置 `Retry-After`。已开流的 Responses 在 `gateway_error.error` 下读取该字段。重试成功仍返回正常输出。默认模式直接使用 ACP，完整镜像无需安装 Python。
+Linux amd64 的 slim 和 AIO 镜像内置 Frida 17.27.4。网关启动原生 agy 时默认启用精确状态码观测。本版探针对应 agy 1.5.14 的 amd64 ELF，SHA-256 为 `37873b8062391b6202a3d3199ec012abc9e53aab720d26cd65699441497d8c94`。网关只观测自己启动的该版本模型会话子进程。认证、登出和空闲刷新仍走普通 ACP。arm64 或未识别的 CLI 使用原生 ACP 错误。
 
-另一项 `-agy-frida-python /absolute/path/to/python` 只供本地 mock CCPA 做内存对照。压测中出现过 worker 异常退出，常规错误映射使用上面的会话库读取器。两个选项都会核对完整二进制哈希。[Go 分类](agy_acp_gateway/observed_error.go) · [只读适配器](agy_acp_gateway/observer/bridge.py)
+当 agy 将提供方错误转换成助手消息时，网关核对本回合的终态与错误来源。例如模型权限拒绝返回 HTTP 403 及 `upstream_permission_denied`，上游 401 返回 503 及 `upstream_auth_failed`。原始 HTTP 码见 `error.upstream.provider_http_status`。其中 `observation_source=frida` 表示数值由内存探针确认，`trajectory_store` 表示由本地只读会话库独立核实。若精确匹配不可用，保留 ACP 的实际返回。已确认的提供方枚举和重试时间分别在 `error.upstream.provider_status`、`error.retry_after_s`。可写 HTTP 头时也会返回 `Retry-After`。
 
-在仓库根目录执行下面的命令，会在回环网络中运行带错误映射的完整 CLI 验收。设置 `AGY_FRIDA_PYTHON` 后还会单独运行内存探针对照组。
+`GATEWAY_STATUS_OBSERVER=store` 可单独使用 Python 3.11+ 的 sqlite3 只读会话库观测，`off` 可关闭镜像自动观测。裸二进制可显式指定 `-agy-frida-python /path/to/python` 或 `-agy-status-python /path/to/python3`。Frida 插桩在历史压力测试中出现过 worker 异常退出，业务请求不会自动重发。[Go 分类](agy_acp_gateway/observed_error.go) · [观测适配器](agy_acp_gateway/observer/bridge.py)
 
-```bash
-AGY_STATUS_PYTHON="$(command -v python3)" ./scripts/verify_acp_gateway.sh --real
-```
+在 Linux amd64 上构建两个镜像后，运行 `./scripts/verify_aio.sh --native` 可在无外网的 AIO 容器里验证镜像默认模式，包含对 Frida 来源、403、429、成功重试、两种 SSE 和超时的断言。宿主机离线验收也可以通过 `AGY_STATUS_PYTHON`、`AGY_FRIDA_PYTHON` 指定解释器。
 
 ### 本次验收结果（2026-11-22）
 
@@ -213,4 +212,4 @@ AGY_STATUS_PYTHON="$(command -v python3)" ./scripts/verify_acp_gateway.sh --real
 
 ## 持续集成与发布
 
-推送到 main 和提交 PR 会运行最低支持的 Go 1.23 及 Go 1.26 的静态检查、竞态测试、Compose 配置校验和独立二进制 HTTP 冒烟测试。在 Actions 的 CI 页面勾选 `native` 可另外构建 AIO 与 slim 并用临时身份执行原生 CLI 离线验收。推送形如 `v0.1.0` 的版本标签会先运行 CI，再发布 Linux 二进制、校验和和 slim 容器。[CI 工作流](.github/workflows/ci.yml) · [发布工作流](.github/workflows/release.yml)
+推送到 main 和提交 PR 会运行最低支持的 Go 1.23 及 Go 1.26 的静态检查、竞态测试、Compose 配置校验和独立二进制 HTTP 冒烟测试。在 Actions 的 CI 页面勾选 `native` 可另外构建 AIO 与 slim 并用临时身份执行原生 CLI 离线验收。推送形如 `v0.1.0` 的版本标签会先运行 CI 与 amd64 原生镜像验收，再发布 Linux 二进制、校验和和 slim 容器。[CI 工作流](.github/workflows/ci.yml) · [发布工作流](.github/workflows/release.yml)

@@ -25,7 +25,7 @@ func run(ctx context.Context) error {
 	flag.StringVar(&bind, "listen", "127.0.0.1:8080", "public HTTP address")
 	flag.StringVar(&bin, "agy", "", "real ACP executable (default uses bundled offline mock)")
 	flag.StringVar(&observerPython, "agy-status-python", "", "optional Python 3.11+ interpreter for read-only pinned agy trajectory errors")
-	flag.StringVar(&fridaPython, "agy-frida-python", "", "experimental alternative for loopback mock CCPA using Frida")
+	flag.StringVar(&fridaPython, "agy-frida-python", "", "Python interpreter for the pinned native Frida status observer")
 	flag.StringVar(&endpoint, "mock-ccpa", "", "loopback mock CCPA URL for the real worker")
 	flag.StringVar(&agent, "agent", "", "ACP agent name (default auto-provisions minimal gateway-clean agent without built-in coding tools or default prompt; use \"default\" for agy's built-in agent)")
 	flag.StringVar(&modelMap, "model-map", "{}", "JSON object mapping aliases to model IDs")
@@ -118,18 +118,9 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		backend := "store"
-		if fridaPython != "" {
-			if live || observerPython != "" {
-				return errors.New("the experimental Frida observer requires -mock-ccpa and a single observer")
-			}
-			observerPython, backend = fridaPython, "frida"
-		}
-		if observerPython != "" {
-			cmd, err = withStatusObserver(cmd, observerPython, backend)
-			if err != nil {
-				return err
-			}
+		cmd, err = configureStatusObserver(cmd, observerPython, fridaPython, os.Getenv("GATEWAY_STATUS_OBSERVER"))
+		if err != nil {
+			return err
 		}
 	} else {
 		if observerPython != "" || fridaPython != "" {

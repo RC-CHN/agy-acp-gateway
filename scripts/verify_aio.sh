@@ -83,5 +83,14 @@ test "$(cat "$work/synthetic")" = '{"auth_method":"consumer","id_token_email":"e
 start "$slim"
 request GET /admin/api/status 200
 grep -q '"mode":"mock"' "$work/reply"
+if [[ ${1:-} == --native ]]; then
+  CGO_ENABLED=0 go test -c -o "$work/verify" ./agy_acp_gateway
+  docker run --rm --init --network none --read-only --cap-drop ALL \
+    --security-opt=no-new-privileges --tmpfs /tmp:exec,mode=1777 \
+    -v "$work/verify:/verify:ro" --entrypoint /verify \
+    -e AGY_GATEWAY_BINARY=/usr/local/bin/agy-acp-gateway -e AGY_REAL_BINARY=/usr/local/bin/agy \
+    -e AGY_STATUS_PYTHON=/usr/bin/python3 -e AGY_VERIFY_IMAGE_DEFAULT=1 \
+    "$aio" -test.v -test.run '^TestReal' -test.timeout 5m
+fi
 docker image inspect --format '{{index .RepoTags 0}} {{.Os}}/{{.Architecture}} {{.Id}}' "$aio" "$slim"
 echo 'AIO and slim container checks passed'

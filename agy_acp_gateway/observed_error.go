@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,32 @@ var observerBridge string
 
 //go:embed observer/status.js
 var observerAgent string
+
+// Explicit flags are strict. An image default can fall back to ordinary ACP
+// when the user mounts a newer CLI whose layout has not been verified.
+func configureStatusObserver(cmd command, storePython, fridaPython, mode string) (command, error) {
+	switch {
+	case storePython != "" && fridaPython != "":
+		return command{}, errors.New("select one agy status observer")
+	case fridaPython != "":
+		return withStatusObserver(cmd, fridaPython, "frida")
+	case storePython != "":
+		return withStatusObserver(cmd, storePython, "store")
+	}
+	switch mode {
+	case "", "off":
+		return cmd, nil
+	case "frida", "store":
+		observed, err := withStatusObserver(cmd, "/usr/bin/python3", mode)
+		if err != nil {
+			slog.Warn("native status observer unavailable, using ACP", "observer", mode)
+			return cmd, nil
+		}
+		return observed, nil
+	default:
+		return command{}, errors.New("GATEWAY_STATUS_OBSERVER must be frida, store or off")
+	}
+}
 
 func withStatusObserver(cmd command, python, backend string) (command, error) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
@@ -66,6 +93,10 @@ func observedError(result obj) error {
 		f = problem(502, "upstream_error", "The model service could not complete the request.")
 	}
 	f.upstream = obj{"provider_http_status": source}
+	switch provenance := str(result["gateway_observed_source"]); provenance {
+	case "frida", "trajectory_store":
+		f.upstream["observation_source"] = provenance
+	}
 	if state := str(result["gateway_observed_provider_status"]); knownProviderStatus(state) {
 		f.upstream["provider_status"] = state
 	}

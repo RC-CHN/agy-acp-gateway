@@ -146,7 +146,11 @@ func TestRealIdleCredentialRefresh(t *testing.T) {
 	const expiredAt = "2000-01-01T00:00:00Z"
 	expire := func() {
 		t.Helper()
-		record := read()
+		var record obj
+		until(t, func() bool {
+			record = read()
+			return asObj(record["token"]) != nil
+		})
 		asObj(record["token"])["expiry"] = expiredAt
 		if err := os.WriteFile(path+".fixture", []byte(enc(record)), 0600); err != nil {
 			t.Fatal(err)
@@ -204,6 +208,14 @@ func TestRealIdleCredentialRefresh(t *testing.T) {
 	until(t, func() bool {
 		token := asObj(read()["token"])
 		return attempts.Load() > renewed && token["access_token"] == "offline-access-2" && token["refresh_token"] == "offline-refresh-2"
+	})
+	// The native writer can update the same file again during session setup.
+	// Finish that check before the fixture expires the newly issued token.
+	observedAt := time.Now()
+	until(t, func() bool {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		return g.lastAuthCheck.After(observedAt)
 	})
 	// Some OAuth responses only replace the access token. The last refresh
 	// token must remain usable for the next idle period and process restart.

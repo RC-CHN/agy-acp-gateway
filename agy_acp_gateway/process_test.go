@@ -18,6 +18,11 @@ import (
 
 func startTestCLI(t *testing.T, bin string, args ...string) (string, *exec.Cmd, *http.Client) {
 	t.Helper()
+	return startTestCLIEnv(t, bin, nil, args...)
+}
+
+func startTestCLIEnv(t *testing.T, bin string, env []string, args ...string) (string, *exec.Cmd, *http.Client) {
+	t.Helper()
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +31,7 @@ func startTestCLI(t *testing.T, bin string, args ...string) (string, *exec.Cmd, 
 	l.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	cmd := exec.CommandContext(ctx, bin, append([]string{"-listen", addr}, args...)...)
-	cmd.Env = []string{"HOME=" + t.TempDir()}
+	cmd.Env = append([]string{"HOME=" + t.TempDir()}, env...)
 	cmd.Stderr = os.Stderr
 	if err = cmd.Start(); err != nil {
 		cancel()

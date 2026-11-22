@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -43,8 +44,17 @@ func TestUnsupportedStatusObserverBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = withStatusObserver(command{bin: f}, python, "store")
-	if err == nil || !strings.Contains(err.Error(), "unsupported agy binary") {
+	if err == nil || (runtime.GOARCH == "amd64" && !strings.Contains(err.Error(), "unsupported agy binary")) {
 		t.Fatalf("unexpected preflight result %v", err)
+	}
+	for _, mode := range []string{"off", "store", "frida"} {
+		c, err := configureStatusObserver(command{bin: f}, "", "", mode)
+		if err != nil || c.bin != f || c.observeStatus {
+			t.Fatalf("image default %q failed to preserve ordinary ACP", mode)
+		}
+	}
+	if _, err := configureStatusObserver(command{bin: f}, python, python, ""); err == nil {
+		t.Fatal("conflicting explicit observers")
 	}
 }
 
@@ -56,10 +66,20 @@ func TestRealFridaStatus(t *testing.T) {
 	testRealStatus(t, "-agy-frida-python", os.Getenv("AGY_FRIDA_PYTHON"))
 }
 
+func TestRealImageObserver(t *testing.T) {
+	if os.Getenv("AGY_VERIFY_IMAGE_DEFAULT") != "1" {
+		t.Skip("runs inside the official amd64 gateway image")
+	}
+	if os.Getenv("GATEWAY_STATUS_OBSERVER") != "frida" {
+		t.Fatal("missing image default")
+	}
+	testRealStatus(t, "", "")
+}
+
 func testRealStatus(t *testing.T, option, python string) {
 	t.Helper()
 	bin, agy := os.Getenv("AGY_GATEWAY_BINARY"), os.Getenv("AGY_REAL_BINARY")
-	if bin == "" || agy == "" || python == "" {
+	if bin == "" || agy == "" || (option != "" && python == "") {
 		t.Skip("requires gateway, pinned agy and an interpreter for the selected observer")
 	}
 	if err := offlineNamespace(); err != nil {
@@ -152,7 +172,14 @@ func testRealStatus(t *testing.T, option, python string) {
 		fmt.Fprintf(w, "data: %s\r\n\r\n", enc(obj{"response": obj{"candidates": []obj{{"content": obj{"role": "model", "parts": []obj{{"text": text}}}, "finishReason": "STOP"}}}, "traceId": "offline"}))
 	}))
 	defer up.Close()
-	addr, _, client := startTestCLI(t, bin, "-agy", agy, "-mock-ccpa", up.URL, option, python, "-turn-timeout", "12s")
+	args := []string{"-agy", agy, "-mock-ccpa", up.URL, "-turn-timeout", "12s"}
+	var env []string
+	if option != "" {
+		args = append(args, option, python)
+	} else {
+		env = []string{"GATEWAY_STATUS_OBSERVER=" + os.Getenv("GATEWAY_STATUS_OBSERVER")}
+	}
+	addr, _, client := startTestCLIEnv(t, bin, env, args...)
 	run := func(t *testing.T, name string, source, want int, stream, chat bool) {
 		t.Helper()
 		path := "/v1/responses"
@@ -211,6 +238,9 @@ func testRealStatus(t *testing.T, option, python string) {
 		}
 		if !strings.Contains(body, fmt.Sprintf(`"provider_http_status":%d`, source)) {
 			t.Fatalf("%s missing original HTTP %d, body %.1200s", name, source, body)
+		}
+		if name == "forbidden" && (option == "" || option == "-agy-frida-python") && !strings.Contains(body, `"observation_source":"frida"`) {
+			t.Fatal("the Frida observer did not supply the status on the native 403")
 		}
 		if stream && chat && (strings.Count(body, "[DONE]") != 1 || strings.Contains(body, `"finish_reason":"stop"`)) {
 			t.Fatal(body)
